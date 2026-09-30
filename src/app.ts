@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import type { Request, Response } from "express";
 import helmet from "helmet";
 import { authenticate, correlation } from "./auth.js";
 import { config } from "./config.js";
@@ -56,7 +57,20 @@ export const createApp = () => {
 	}));
 	app.use(express.json({ limit: "2mb" }));
 	app.use(correlation);
-	app.get("/health", (_request, response) => response.json({ success: true, service: "shared-pos", status: "ok" }));
+	/**
+	 * Liveness, on both the path a human tries and the path a probe defaults to.
+	 *
+	 * ! `/` matters as much as `/health` here. A platform health check that is
+	 * ! left on its default asks for `/`, and a 404 reads as "unhealthy" - the
+	 * ! proxy then refuses to route to a service that is running perfectly well
+	 * ! and every request comes back 502, with nothing wrong in the logs to
+	 * ! explain it. Answering at the root costs nothing and removes a whole
+	 * ! class of deployment mystery.
+	 */
+	const alive = (_request: Request, response: Response) =>
+		response.json({ success: true, service: "shared-pos", status: "ok" });
+	app.get("/", alive);
+	app.get("/health", alive);
 	app.use("/v1", authenticate);
 	app.use("/v1/session", sessionRouter);
 	app.use("/v1/catalog", catalogRouter);
