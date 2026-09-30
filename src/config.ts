@@ -36,7 +36,25 @@ const schema = z.object({
 
 const parsed = schema.safeParse(process.env);
 if (!parsed.success) {
-	throw new Error(`Invalid environment: ${parsed.error.message}`);
+	/**
+	 * Named plainly, one per line.
+	 *
+	 * ! This is the first thing a deployment sees when it is misconfigured, and
+	 * ! the container dies before anything else can be logged - which reaches
+	 * ! the operator as "502 Bad Gateway" and nothing else. A dump of Zod's
+	 * ! issue objects buried the one fact that matters, which variable is
+	 * ! missing, so it is spelled out here instead.
+	 */
+	const missing = parsed.error.issues
+		.map((issue) => `  - ${issue.path.join(".") || "(root)"}: ${issue.message}`)
+		.join("\n");
+	throw new Error(
+		[
+			"Shared POS cannot start: its environment is incomplete.",
+			missing,
+			"DATABASE_URL must include ?schema=shared_pos. AO_API_URL and RENT_BUDDY_API_URL have no default outside development.",
+		].join("\n"),
+	);
 }
 
 export const config = {
