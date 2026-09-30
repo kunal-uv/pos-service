@@ -1,0 +1,225 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum CartStatus {
+  OPEN
+  HELD
+  CHECKING_OUT
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
+enum TransactionKind {
+  SALE
+  RENTAL
+}
+
+enum PaymentStatus {
+  PENDING
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  VOIDED
+  REFUNDED
+}
+
+enum IntegrationStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
+
+model Cart {
+  id                 String          @id @default(uuid())
+  tenantId           String
+  storeId            String
+  userId             String
+  kind               TransactionKind
+  status             CartStatus      @default(OPEN)
+  customerId         String?
+  customerSnapshot   Json?
+  currency           String          @db.Char(3)
+  taxRate             Decimal         @default(0) @db.Decimal(9, 6)
+  subtotal            Decimal         @default(0) @db.Decimal(14, 2)
+  discountTotal       Decimal         @default(0) @db.Decimal(14, 2)
+  taxTotal            Decimal         @default(0) @db.Decimal(14, 2)
+  feeTotal            Decimal         @default(0) @db.Decimal(14, 2)
+  depositTotal        Decimal         @default(0) @db.Decimal(14, 2)
+  grandTotal          Decimal         @default(0) @db.Decimal(14, 2)
+  /**
+   * Money the platform already holds for this customer - the value of a
+   * machine handed back over the counter - spent against this sale. The
+   * reference is the platform's own record of it, and the platform is what
+   * decides the amount: the till only ever names the reference.
+   */
+  creditTotal         Decimal         @default(0) @db.Decimal(14, 2)
+  creditReference     String?
+  creditLabel         String?
+  notes               String?         @db.Text
+  fulfilment          Json?
+  version             Int             @default(1)
+  heldName            String?
+  expiresAt           DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  lines               CartLine[]
+  payments            Payment[]
+  order               Order?
+
+  @@index([tenantId, storeId, userId, status])
+  @@index([expiresAt])
+}
+
+model CartLine {
+  id                 String   @id @default(uuid())
+  cartId             String
+  cart               Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  externalProductId  String
+  externalUnitId     String?
+  reservationKey     String?  @unique
+  sku                String?
+  serial             String?
+  name               String
+  imageUrl           String?
+  quantity           Int      @default(1)
+  unitPrice          Decimal  @db.Decimal(14, 2)
+  originalUnitPrice  Decimal? @db.Decimal(14, 2)
+  discountAmount     Decimal  @default(0) @db.Decimal(14, 2)
+  feeAmount          Decimal  @default(0) @db.Decimal(14, 2)
+  depositAmount      Decimal  @default(0) @db.Decimal(14, 2)
+  taxAmount          Decimal  @default(0) @db.Decimal(14, 2)
+  lineTotal          Decimal  @default(0) @db.Decimal(14, 2)
+  rentalStart        DateTime?
+  rentalEnd          DateTime?
+  rentalTenure       Int?
+  metadata           Json     @default("{}")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([cartId])
+  @@index([externalProductId])
+  @@index([externalUnitId])
+}
+
+model Order {
+  id                 String          @id @default(uuid())
+  number             String          @unique
+  tenantId           String
+  storeId            String
+  userId             String
+  kind               TransactionKind
+  cartId             String          @unique
+  cart               Cart            @relation(fields: [cartId], references: [id])
+  externalOrderId    String?
+  customerId         String?
+  customerSnapshot   Json?
+  currency           String          @db.Char(3)
+  subtotal           Decimal         @db.Decimal(14, 2)
+  discountTotal      Decimal         @db.Decimal(14, 2)
+  taxTotal           Decimal         @db.Decimal(14, 2)
+  feeTotal           Decimal         @db.Decimal(14, 2)
+  depositTotal       Decimal         @db.Decimal(14, 2)
+  grandTotal         Decimal         @db.Decimal(14, 2)
+  platformSnapshot   Json?
+  createdAt          DateTime        @default(now())
+  lines              OrderLine[]
+
+  @@index([tenantId, storeId, createdAt])
+  @@index([externalOrderId])
+}
+
+model OrderLine {
+  id                 String   @id @default(uuid())
+  orderId            String
+  order              Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  externalProductId  String
+  externalUnitId     String?
+  sku                String?
+  serial             String?
+  name               String
+  quantity           Int
+  unitPrice          Decimal  @db.Decimal(14, 2)
+  discountAmount     Decimal  @db.Decimal(14, 2)
+  feeAmount          Decimal  @db.Decimal(14, 2)
+  depositAmount      Decimal  @db.Decimal(14, 2)
+  taxAmount          Decimal  @db.Decimal(14, 2)
+  lineTotal          Decimal  @db.Decimal(14, 2)
+  rentalStart        DateTime?
+  rentalEnd          DateTime?
+  rentalTenure       Int?
+  snapshot           Json     @default("{}")
+
+  @@index([orderId])
+}
+
+model Payment {
+  id                 String        @id @default(uuid())
+  cartId             String
+  cart               Cart          @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  method             String
+  amount             Decimal       @db.Decimal(14, 2)
+  status             PaymentStatus @default(PENDING)
+  externalReference  String?
+  metadata           Json          @default("{}")
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  @@index([cartId])
+  @@index([externalReference])
+}
+
+model IdempotencyRecord {
+  id          String   @id @default(uuid())
+  tenantId    String
+  key         String
+  requestHash String
+  statusCode  Int
+  response    Json
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@unique([tenantId, key])
+  @@index([expiresAt])
+}
+
+model AuditEvent {
+  id          String   @id @default(uuid())
+  tenantId    String
+  storeId     String
+  userId      String
+  entityType  String
+  entityId    String
+  action      String
+  before      Json?
+  after       Json?
+  correlationId String
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, entityType, entityId])
+  @@index([createdAt])
+}
+
+model OutboxEvent {
+  id          String            @id @default(uuid())
+  tenantId    String
+  topic       String
+  aggregateId String
+  payload     Json
+  status      IntegrationStatus @default(PENDING)
+  attempts    Int               @default(0)
+  availableAt DateTime          @default(now())
+  lastError   String?
+  createdAt   DateTime          @default(now())
+  sentAt      DateTime?
+
+  @@index([status, availableAt])
+}
