@@ -77,6 +77,18 @@ export const upstreamRequest = async <T>(
 		try {
 			body = raw ? (JSON.parse(raw) as UpstreamEnvelope<T>) : null;
 		} catch {
+			/**
+			 * ! Logged with the URL and the first of the body, because the
+			 * ! client is told only "unreadable" - and the usual cause is a
+			 * ! base URL missing its path prefix, which answers with an HTML
+			 * ! 404 page from the proxy. Without this line the operator has a
+			 * ! correlation id and nothing to correlate it to.
+			 */
+			console.warn(
+				`Unreadable response from ${url} (HTTP ${response.status}, ${
+					response.headers.get("content-type") ?? "no content-type"
+				}): ${raw.slice(0, 120).replace(/\s+/g, " ")}`,
+			);
 			throw new ApiError("Platform returned an unreadable response", 502, "UPSTREAM_INVALID_RESPONSE");
 		}
 

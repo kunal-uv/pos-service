@@ -10,7 +10,14 @@ export interface StaffSession {
 	displayName: string | null;
 	permissions: string[];
 	currency: string;
+	/** The combined rate every cart is priced with. */
 	taxRate: number;
+	/**
+	 * The same rate itemised, as the platform has it configured (GST, PST, ...).
+	 * Display only - pricing uses `taxRate`. Absent when the platform does not
+	 * report a breakdown, in which case the till shows the combined rate alone.
+	 */
+	taxes?: { name: string; rate: number }[];
 	/** Store-configured delivery charge. Zero/undefined means delivery is free. */
 	shippingFee?: number;
 	capabilities: PosCapabilities;

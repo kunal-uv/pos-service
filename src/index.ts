@@ -28,8 +28,19 @@ const sweep = async () => {
 		// one surfaces here. That is a setup step, not a fault worth a stack
 		// trace: say which command fixes it.
 		if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2021") {
+			/**
+			 * ! Two causes, and the wrong one is the tempting one. Migrating an
+			 * ! already-migrated database fixes nothing when the real fault is a
+			 * ! `DATABASE_URL` that never named the schema - Prisma then looks in
+			 * ! `public`, finds no tables, and every request 500s while the
+			 * ! tables sit in `shared_pos` untouched. Both are named here.
+			 */
 			console.error(
-				`The POS tables do not exist in ${describeDatabase()}. Run \`yarn db:migrate\` (or \`yarn db:push\`) before starting the service.`,
+				[
+					`The POS tables are not visible in ${describeDatabase()}.`,
+					`  1. DATABASE_URL must end with ?schema=${POS_SCHEMA} (use & if it already has a query string).`,
+					"  2. If the schema has never been created, run `npx prisma migrate deploy`.",
+				].join("\n"),
 			);
 			return;
 		}
