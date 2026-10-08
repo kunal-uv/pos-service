@@ -46,6 +46,21 @@ export interface PosCapabilities {
 	securityDeposits: boolean;
 	holds: boolean;
 	splitPayments: boolean;
+	/**
+	 * The sale may complete with less than the full amount tendered — a deposit
+	 * taken when a delivery is booked, with the balance collected at the door.
+	 *
+	 * ! Off unless a platform says otherwise. A sale that completes underpaid is
+	 * ! a debt the platform has to carry and chase, so it is not something the
+	 * ! till may decide to allow on a platform that has nowhere to record it.
+	 */
+	partialPayment?: boolean;
+	/**
+	 * Cash may be over-tendered and change given. Display and receipt only: the
+	 * payment recorded against the sale is what was APPLIED, never the note
+	 * handed across.
+	 */
+	cashChange?: boolean;
 	signature: boolean;
 	fulfilment: Array<"PICKUP" | "DELIVERY">;
 }
@@ -156,8 +171,19 @@ export interface PlatformCheckout {
 		tax: number;
 		fees: number;
 		shipping: number;
+		/** The operator's labelled charge, if the sale carried one. */
+		customCharge: number;
 		deposit: number;
 		grandTotal: number;
+		/**
+		 * What was actually tendered against the sale, and what is still owed.
+		 *
+		 * ! `amountPaid` equals `grandTotal` on an ordinary sale and `balanceDue`
+		 * ! is 0, so a platform that ignores both keeps behaving exactly as
+		 * ! before. They differ only when a deposit was taken.
+		 */
+		amountPaid: number;
+		balanceDue: number;
 	};
 }
 

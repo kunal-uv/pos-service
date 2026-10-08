@@ -108,6 +108,45 @@ export class RentBuddyzAdapter implements PlatformAdapter {
 		);
 	}
 
+	/**
+	 * Whether this customer is zero-rated, and the sentence that justifies it.
+	 *
+	 * ! Asked of Rent Buddy rather than decided here. The till must never be the
+	 * ! place a tax decision is made: the platform invoices the sale and the
+	 * ! platform answers for it to an auditor.
+	 *
+	 * ! An outright exemption wins over a reseller permit when a customer somehow
+	 * ! carries both, because it is the broader claim and the one with its own
+	 * ! stated reason.
+	 */
+	async resolveCustomerTax(
+		session: StaffSession,
+		customerId: string,
+	): Promise<{ exempt: boolean; reason: string | null }> {
+		const data = await this.request<{ customer: Record<string, unknown> }>(
+			withQuery(`${this.baseUrl}/admin/pos/customers/${encodeURIComponent(customerId)}`, {
+				store_id: session.storeId,
+			}),
+			session.token,
+		);
+		const customer = data.customer ?? {};
+
+		if (customer.is_tax_exempt === true) {
+			return {
+				exempt: true,
+				reason:
+					String(customer.tax_exempt_reason ?? "").trim() || "Tax-exempt customer",
+			};
+		}
+
+		const permit = String(customer.reseller_permit_number ?? "").trim();
+		if (customer.is_reseller === true && permit) {
+			return { exempt: true, reason: `Reseller - permit ${permit}` };
+		}
+
+		return { exempt: false, reason: null };
+	}
+
 	async commitCheckout(session: StaffSession, checkout: PlatformCheckout): Promise<PlatformCheckoutResult> {
 		return this.request<PlatformCheckoutResult>(
 			withQuery(`${this.baseUrl}/admin/pos/checkout`, { store_id: session.storeId }),

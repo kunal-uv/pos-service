@@ -34,17 +34,61 @@ const shippingFromFulfilment = (value: unknown): number => {
     : 0;
 };
 
-const withStoreShipping = (
-  value: unknown,
-  shippingFee: number | undefined,
-): Record<string, unknown> => {
+/** A labelled charge for anything that is not delivery. Zero when unset. */
+const customFromFulfilment = (value: unknown): number => {
+  const fulfilment = fulfilmentRecord(value);
+  return Math.max(0, Number(fulfilment.customCharge) || 0);
+};
+
+/** The description printed beside the custom charge. */
+const labelFromFulfilment = (value: unknown): string | null => {
+  const label = fulfilmentRecord(value).customChargeLabel;
+  return typeof label === "string" && label.trim() ? label.trim() : null;
+};
+
+/** Both operator charges and their taxability, as `priceLines` wants them. */
+const chargesFromFulfilment = (value: unknown) => {
   const fulfilment = fulfilmentRecord(value);
   return {
+    shippingAmount: shippingFromFulfilment(value),
+    shippingTaxable: fulfilment.deliveryChargeTaxable !== false,
+    customAmount: customFromFulfilment(value),
+    customTaxable: fulfilment.customChargeTaxable !== false,
+  };
+};
+
+/**
+ * Normalises the operator-set charges on a fulfilment.
+ *
+ * ! This used to overwrite `shippingFee` with the store's fixed fee on every
+ * ! write, which is what made delivery one price for every job. The figure the
+ * ! counter set is now kept; `shippingFee` from the session is only a starting
+ * ! default, and the platform sends 0 for it.
+ *
+ * Delivery is still forced to 0 on a pickup — nothing was delivered, so there
+ * is nothing to charge for, and leaving a stale amount on a cart that switched
+ * method would bill for a van that never left.
+ */
+const withOperatorCharges = (
+  value: unknown,
+  fallbackShippingFee: number | undefined,
+): Record<string, unknown> => {
+  const fulfilment = fulfilmentRecord(value);
+  const isDelivery = String(fulfilment.method ?? "").toLowerCase() === "delivery";
+  const set = (candidate: unknown, fallback: unknown): number =>
+    Math.max(0, Number(candidate ?? fallback) || 0);
+
+  return {
     ...fulfilment,
-    shippingFee:
-      String(fulfilment.method ?? "").toLowerCase() === "delivery"
-        ? Math.max(0, Number(shippingFee) || 0)
-        : 0,
+    shippingFee: isDelivery ? set(fulfilment.shippingFee, fallbackShippingFee) : 0,
+    customCharge: set(fulfilment.customCharge, 0),
+    customChargeLabel:
+      typeof fulfilment.customChargeLabel === "string"
+        ? fulfilment.customChargeLabel.trim() || null
+        : null,
+    // Both default to taxable, which is how the store fee was always treated.
+    deliveryChargeTaxable: fulfilment.deliveryChargeTaxable !== false,
+    customChargeTaxable: fulfilment.customChargeTaxable !== false,
   };
 };
 
@@ -121,6 +165,10 @@ export const presentCart = (cart: LoadedCart) => ({
   taxTotal: number(cart.taxTotal),
   feeTotal: number(cart.feeTotal),
   shippingTotal: shippingFromFulfilment(cart.fulfilment),
+  customTotal: customFromFulfilment(cart.fulfilment),
+  // The till prints this beside the amount; an unlabelled charge is exactly
+  // what the label exists to prevent.
+  customChargeLabel: labelFromFulfilment(cart.fulfilment),
   depositTotal: number(cart.depositTotal),
   creditTotal: number(cart.creditTotal),
   grandTotal: number(cart.grandTotal),
@@ -135,10 +183,24 @@ export const presentCart = (cart: LoadedCart) => ({
     taxAmount: number(line.taxAmount),
     lineTotal: number(line.lineTotal),
   })),
-  payments: cart.payments.map((payment) => ({
-    ...payment,
-    amount: number(payment.amount),
-  })),
+  payments: cart.payments.map((payment) => {
+    const metadata = (payment.metadata ?? {}) as { tendered?: number };
+    const amount = number(payment.amount);
+    // Cash counted out over the amount applied. The difference is the change
+    // handed back, and both are shown on the receipt.
+    const tendered =
+      typeof metadata.tendered === "number" ? metadata.tendered : null;
+
+    return {
+      ...payment,
+      amount,
+      tendered,
+      change:
+        tendered === null
+          ? null
+          : Math.round((tendered - amount) * 100) / 100,
+    };
+  }),
 });
 
 const ownedCart = async (
@@ -200,7 +262,7 @@ const reprice = async (
       rentalTenure: line.rentalTenure,
     })),
     taxRate,
-    shippingFromFulfilment(cart.fulfilment),
+    chargesFromFulfilment(cart.fulfilment),
     number(cart.creditTotal),
   );
 
@@ -267,7 +329,7 @@ export const findOrCreateCart = async (
         where: { id: existing.id },
         data: {
           fulfilment: json(
-            withStoreShipping(existing.fulfilment, session.shippingFee),
+            withOperatorCharges(existing.fulfilment, session.shippingFee),
           ),
           taxRate: exempt ? 0 : session.taxRate,
         },
@@ -713,7 +775,7 @@ export const updateCart = async (
             }
           : {}),
         ...(input.notes !== undefined ? { notes: input.notes || null } : {}),
-        fulfilment: json(withStoreShipping(fulfilment, session.shippingFee)),
+        fulfilment: json(withOperatorCharges(fulfilment, session.shippingFee)),
         ...(input.heldName !== undefined
           ? { heldName: input.heldName || null }
           : {}),
@@ -789,12 +851,161 @@ export const applyCredit = async (
   return getCart(session, cartId);
 };
 
+/**
+ * Parking a sale.
+ *
+ * ! Parked carts are store-scoped, not operator-scoped. One person takes a
+ * ! deposit decision to the manager, another finishes the sale when the
+ * ! customer comes back from the car park — a cart only its author could
+ * ! resume would be a cart nobody can resume on the next shift.
+ *
+ * ! The stale-cart sweep deliberately skips HELD, so parking a cart also parks
+ * ! the unit reservations on it. That is the point: the machine stays held for
+ * ! the customer who is thinking about it.
+ */
+export const holdCart = async (
+  session: StaffSession,
+  cartId: string,
+  name: string | null,
+) => {
+  const cart = await ownedCart(session, cartId, ["OPEN"]);
+
+  if (!cart.lines.length) {
+    throw new ApiError("There is nothing to park", 422, "EMPTY_CART");
+  }
+
+  const held = await prisma.cart.updateMany({
+    where: { id: cartId, status: "OPEN", version: cart.version },
+    data: {
+      status: "HELD",
+      heldName: name?.trim() || null,
+      version: { increment: 1 },
+    },
+  });
+
+  if (held.count !== 1) {
+    throw new ApiError(
+      "Cart changed; refresh and try again",
+      409,
+      "CART_VERSION_CONFLICT",
+    );
+  }
+
+  return getCart(session, cartId);
+};
+
+/** Every sale parked at this till, newest first. */
+export const listHeldCarts = async (session: StaffSession) => {
+  const carts = await prisma.cart.findMany({
+    where: {
+      tenantId: session.tenantId,
+      storeId: session.storeId,
+      status: "HELD",
+    },
+    include: cartInclude,
+    orderBy: { updatedAt: "desc" },
+    take: 50,
+  });
+
+  return carts.map((cart) => {
+    const snapshot = (cart.customerSnapshot ?? {}) as { name?: string };
+
+    return {
+      id: cart.id,
+      heldName: cart.heldName,
+      kind: cart.kind,
+      customerName: snapshot.name ?? null,
+      lineCount: cart.lines.length,
+      grandTotal: number(cart.grandTotal),
+      currency: cart.currency,
+      /** Who parked it, so the person resuming knows whose sale this was. */
+      parkedBy: cart.userId,
+      updatedAt: cart.updatedAt,
+    };
+  });
+};
+
+/**
+ * Picking a parked sale back up.
+ *
+ * ! Ownership moves to whoever resumes it. Every other cart operation is
+ * ! guarded by `ownedCart`, which matches on `userId` — so without this the
+ * ! resuming operator would reopen a cart they could not then add a line to.
+ */
+export const resumeCart = async (session: StaffSession, cartId: string) => {
+  const cart = await prisma.cart.findFirst({
+    where: {
+      id: cartId,
+      tenantId: session.tenantId,
+      storeId: session.storeId,
+      status: "HELD",
+    },
+  });
+
+  if (!cart) {
+    throw new ApiError("That parked sale was not found", 404, "CART_NOT_FOUND");
+  }
+
+  const resumed = await prisma.cart.updateMany({
+    where: { id: cartId, status: "HELD", version: cart.version },
+    data: {
+      status: "OPEN",
+      userId: session.userId,
+      heldName: null,
+      version: { increment: 1 },
+    },
+  });
+
+  if (resumed.count !== 1) {
+    throw new ApiError(
+      "That parked sale was picked up by someone else",
+      409,
+      "CART_VERSION_CONFLICT",
+    );
+  }
+
+  return getCart(session, cartId);
+};
+
 export const replacePayments = async (
   session: StaffSession,
   cartId: string,
-  payments: Array<{ method: string; amount: number; reference?: string }>,
+  payments: Array<{
+    method: string;
+    amount: number;
+    reference?: string;
+    tendered?: number;
+  }>,
 ) => {
   await ownedCart(session, cartId, ["OPEN"]);
+
+  /**
+   * ! `tendered` is what the customer handed over; `amount` is what was applied
+   * ! to the sale. They differ only when cash was counted out over the total,
+   * ! and the difference is the change. Recording the note rather than the
+   * ! amount applied would overstate every cash sale.
+   */
+  for (const payment of payments) {
+    if (payment.tendered === undefined) continue;
+
+    if (!session.capabilities.cashChange) {
+      throw new ApiError(
+        "This platform does not record change given",
+        422,
+        "CHANGE_UNSUPPORTED",
+      );
+    }
+
+    if (Math.round(payment.tendered * 100) < Math.round(payment.amount * 100)) {
+      throw new ApiError(
+        "Tendered is less than the amount applied",
+        422,
+        "TENDER_TOO_SMALL",
+        { tendered: payment.tendered, amount: payment.amount },
+      );
+    }
+  }
+
   await prisma.$transaction(async (tx) => {
     await tx.payment.deleteMany({ where: { cartId, status: "PENDING" } });
     if (payments.length)
@@ -804,6 +1015,8 @@ export const replacePayments = async (
           method: payment.method,
           amount: payment.amount,
           externalReference: payment.reference,
+          metadata:
+            payment.tendered === undefined ? {} : { tendered: payment.tendered },
         })),
       });
   });
@@ -867,12 +1080,45 @@ export const checkout = async (
     (sum, payment) => sum + number(payment.amount),
     0,
   );
-  if (Math.round(paid * 100) !== Math.round(number(cart.grandTotal) * 100)) {
+  const due = number(cart.grandTotal);
+  const cents = (value: number): number => Math.round(value * 100);
+
+  /**
+   * ! Overpaying is always refused. Change given on cash is handled where the
+   * ! cash is counted — the payment RECORDED is what was applied — so a payment
+   * ! line above the amount due is an error, not a tip.
+   */
+  if (cents(paid) > cents(due)) {
+    throw new ApiError(
+      "Payment total is more than the amount due",
+      422,
+      "PAYMENT_MISMATCH",
+      { paid, due },
+    );
+  }
+
+  /**
+   * ! A short payment completes the sale only where the platform can carry the
+   * ! balance. Everywhere else this stays what it has always been: pay in full
+   * ! or do not check out. A sale that completes underpaid on a platform with
+   * ! nowhere to record it is money the shop never learns it is owed.
+   */
+  if (cents(paid) < cents(due) && !session.capabilities.partialPayment) {
     throw new ApiError(
       "Payment total must equal the amount due",
       422,
       "PAYMENT_MISMATCH",
-      { paid, due: number(cart.grandTotal) },
+      { paid, due },
+    );
+  }
+
+  // Nothing at all, on a sale that is owed something, is not a deposit.
+  if (cents(paid) === 0 && cents(due) > 0) {
+    throw new ApiError(
+      "Take at least a deposit before completing the sale",
+      422,
+      "PAYMENT_REQUIRED",
+      { paid, due },
     );
   }
 
@@ -925,8 +1171,11 @@ export const checkout = async (
       tax: number(cart.taxTotal),
       fees: number(cart.feeTotal),
       shipping: shippingFromFulfilment(cart.fulfilment),
+      customCharge: customFromFulfilment(cart.fulfilment),
       deposit: number(cart.depositTotal),
-      grandTotal: number(cart.grandTotal),
+      grandTotal: due,
+      amountPaid: paid,
+      balanceDue: Math.round((due - paid) * 100) / 100,
     },
   };
 

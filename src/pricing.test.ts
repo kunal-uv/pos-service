@@ -10,6 +10,7 @@ test("prices the current rental period and deposit without charging the full ten
 		taxTotal: 9.1,
 		feeTotal: 0,
 		shippingTotal: 0,
+		customTotal: 0,
 		depositTotal: 50,
 		creditTotal: 0,
 		grandTotal: 159.1,
@@ -38,6 +39,7 @@ test("a rental line bills recurring add-ons every period and one-off add-ons onc
 		taxTotal: 276,
 		feeTotal: 120,
 		shippingTotal: 0,
+		customTotal: 0,
 		depositTotal: 1500,
 		creditTotal: 0,
 		grandTotal: 4076,
@@ -59,6 +61,7 @@ test("removed optional recurring and one-time fees no longer affect tax or amoun
 		taxTotal: 243.6,
 		feeTotal: 0,
 		shippingTotal: 0,
+		customTotal: 0,
 		depositTotal: 1500,
 		creditTotal: 0,
 		grandTotal: 3773.6,
@@ -77,6 +80,7 @@ test("delivery shipping is included and taxed using the store rate", () => {
 		taxTotal: 15,
 		feeTotal: 20,
 		shippingTotal: 30,
+		customTotal: 0,
 		depositTotal: 50,
 		creditTotal: 0,
 		grandTotal: 215,
@@ -102,4 +106,73 @@ test("a credit comes off the total after tax, and never more than the sale", () 
 	// A credit worth more than the sale covers it; the till gives no change.
 	assert.equal(covered.totals.creditTotal, 110);
 	assert.equal(covered.totals.grandTotal, 0);
+});
+
+/**
+ * Operator-set charges, replacing the single store shipping fee.
+ *
+ * Each carries its own taxability because whether a stair carry or an
+ * after-hours call-out is taxable is a judgement about the job, not a property
+ * of the store. Getting the flags wrong under- or over-charges tax silently —
+ * the sale completes either way.
+ */
+const line = () => [{quantity: 1, unitPrice: 100}];
+
+test("charges both the delivery and the custom amount", (): void => {
+	const result = priceLines(line(), 0, {shippingAmount: 45, customAmount: 40});
+
+	assert.equal(result.totals.shippingTotal, 45);
+	assert.equal(result.totals.customTotal, 40);
+	assert.equal(result.totals.grandTotal, 185);
+});
+
+test("taxes both charges when both are taxable", (): void => {
+	const result = priceLines(line(), 0.1, {
+		shippingAmount: 50, shippingTaxable: true,
+		customAmount: 30, customTaxable: true,
+	});
+
+	// 10% of 100 + 50 + 30
+	assert.equal(result.totals.taxTotal, 18);
+	assert.equal(result.totals.grandTotal, 198);
+});
+
+test("leaves a charge out of the taxable base when it is not taxable", (): void => {
+	const result = priceLines(line(), 0.1, {
+		shippingAmount: 50, shippingTaxable: false,
+		customAmount: 30, customTaxable: true,
+	});
+
+	// 10% of 100 + 30; the delivery is charged but not taxed.
+	assert.equal(result.totals.taxTotal, 13);
+	assert.equal(result.totals.shippingTotal, 50);
+	assert.equal(result.totals.grandTotal, 193);
+});
+
+test("charges an untaxed custom amount in full", (): void => {
+	const result = priceLines(line(), 0.1, {customAmount: 25, customTaxable: false});
+
+	assert.equal(result.totals.taxTotal, 10);
+	assert.equal(result.totals.customTotal, 25);
+	assert.equal(result.totals.grandTotal, 135);
+});
+
+/**
+ * The other tenant's till still calls this with a bare shipping number, and an
+ * untaxed delivery was not something it could express.
+ */
+test("accepts a bare shipping amount and taxes it, as before", (): void => {
+	const asNumber = priceLines(line(), 0.1, 50);
+	const asCharges = priceLines(line(), 0.1, {shippingAmount: 50, shippingTaxable: true});
+
+	assert.deepEqual(asNumber.totals, asCharges.totals);
+	assert.equal(asNumber.totals.taxTotal, 15);
+});
+
+test("ignores negative charges rather than crediting them", (): void => {
+	const result = priceLines(line(), 0, {shippingAmount: -20, customAmount: -5});
+
+	assert.equal(result.totals.shippingTotal, 0);
+	assert.equal(result.totals.customTotal, 0);
+	assert.equal(result.totals.grandTotal, 100);
 });

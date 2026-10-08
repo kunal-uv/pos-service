@@ -7,7 +7,10 @@ import {
   checkout,
   findOrCreateCart,
   getCart,
+  holdCart,
+  listHeldCarts,
   removeLine,
+  resumeCart,
   replacePayments,
   selectOptionalFee,
   updateLine,
@@ -26,6 +29,18 @@ cartsRouter.post("/", async (request, response, next) => {
       success: true,
       data: await findOrCreateCart(sessionOf(request), kind),
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * ! Declared before `/:id`, or Express matches "held" as a cart id and every
+ * ! request for the parked list comes back as a 404 for a cart called "held".
+ */
+cartsRouter.get("/held", async (request, response, next) => {
+  try {
+    response.json({ success: true, data: await listHeldCarts(sessionOf(request)) });
   } catch (error) {
     next(error);
   }
@@ -180,6 +195,8 @@ cartsRouter.put("/:id/payments", async (request, response, next) => {
               method: z.string().trim().min(1).max(64),
               amount: z.number().positive(),
               reference: z.string().trim().max(200).optional(),
+              /** Cash counted out, when more than the amount applied. */
+              tendered: z.number().positive().optional(),
             }),
           )
           /**
@@ -197,6 +214,31 @@ cartsRouter.put("/:id/payments", async (request, response, next) => {
         request.params.id,
         payments,
       ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+cartsRouter.post("/:id/hold", async (request, response, next) => {
+  try {
+    const { name } = z
+      .object({ name: z.string().trim().max(120).nullable().optional() })
+      .parse(request.body ?? {});
+    response.json({
+      success: true,
+      data: await holdCart(sessionOf(request), request.params.id, name ?? null),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+cartsRouter.post("/:id/resume", async (request, response, next) => {
+  try {
+    response.json({
+      success: true,
+      data: await resumeCart(sessionOf(request), request.params.id),
     });
   } catch (error) {
     next(error);
