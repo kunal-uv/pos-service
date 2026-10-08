@@ -4,6 +4,8 @@ export interface PriceableLine {
 	originalUnitPrice?: number | null;
 	feeAmount?: number;
 	depositAmount?: number;
+	/** A warranty plan sold with the line: its price for the whole quantity, taxed like a fee. */
+	warrantyAmount?: number;
 	rentalTenure?: number | null;
 }
 
@@ -69,13 +71,14 @@ export const priceLines = (
 		const discount = Math.max(0, original - current);
 		const fees = Math.max(0, cents(line.feeAmount ?? 0));
 		const deposit = Math.max(0, cents(line.depositAmount ?? 0));
-		const tax = Math.round((current + fees) * safeRate);
+		const warranty = Math.max(0, cents(line.warrantyAmount ?? 0));
+		const tax = Math.round((current + fees + warranty) * safeRate);
 		return {
 			...line,
 			quantity,
 			discountAmount: dollars(discount),
 			taxAmount: dollars(tax),
-			lineTotal: dollars(current + fees + deposit + tax),
+			lineTotal: dollars(current + fees + warranty + deposit + tax),
 		};
 	});
 
@@ -90,6 +93,7 @@ export const priceLines = (
 			discountTotal: sum((line) => line.discountAmount),
 			taxTotal: dollars(cents(sum((line) => line.taxAmount)) + shippingTax + customTax),
 			feeTotal: sum((line) => line.feeAmount ?? 0),
+			warrantyTotal: sum((line) => line.warrantyAmount ?? 0),
 			shippingTotal: dollars(shipping),
 			customTotal: dollars(custom),
 			depositTotal: sum((line) => line.depositAmount ?? 0),

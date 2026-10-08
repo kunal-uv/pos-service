@@ -144,7 +144,11 @@ cartsRouter.delete("/:id/lines/:lineId", async (request, response, next) => {
 cartsRouter.patch("/:id/lines/:lineId", async (request, response, next) => {
   try {
     const body = z
-      .object({ note: z.string().max(2000).nullable().optional() })
+      .object({
+        note: z.string().max(2000).nullable().optional(),
+        // The warranty plan sold with this line; null takes it off.
+        warrantyId: z.string().min(1).max(40).nullable().optional(),
+      })
       .parse(request.body);
     response.json({
       success: true,

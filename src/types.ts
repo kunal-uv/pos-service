@@ -150,6 +150,8 @@ export interface PlatformCheckoutLine {
 	rentalStart: string | null;
 	rentalEnd: string | null;
 	rentalTenure: number | null;
+	/** The warranty plan chosen for this line, and what it costs for the quantity on it. */
+	warranty?: { id: string; price: number } | null;
 	metadata: Record<string, unknown>;
 }
 
@@ -170,6 +172,8 @@ export interface PlatformCheckout {
 		discount: number;
 		tax: number;
 		fees: number;
+		/** Warranty plans on the sale, taxed with it. */
+		warranty?: number;
 		shipping: number;
 		/** The operator's labelled charge, if the sale carried one. */
 		customCharge: number;
@@ -211,6 +215,12 @@ export interface PlatformAdapter {
 	searchCustomers(session: StaffSession, search: string): Promise<CustomerSummary[]>;
 	getCustomerAddresses(session: StaffSession, customerId: string): Promise<CustomerAddress[]>;
 	createCustomer(session: StaffSession, input: Record<string, unknown>): Promise<CustomerSummary>;
+	/**
+	 * Proving a new customer's email with an emailed code, for platforms whose
+	 * New Customer form asks for it. Absent on a platform that does not.
+	 */
+	sendCustomerEmailCode?(session: StaffSession, email: string): Promise<void>;
+	verifyCustomerEmailCode?(session: StaffSession, email: string, code: string): Promise<void>;
 	commitCheckout(session: StaffSession, checkout: PlatformCheckout): Promise<PlatformCheckoutResult>;
 	/**
 	 * Whether this customer is exempt from sales tax, as the platform decides it.

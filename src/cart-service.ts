@@ -121,6 +121,55 @@ const lineAttributes = (metadata: unknown): PosLineAttribute[] => {
   return normalizeAttributes(product?.attributes);
 };
 
+/** A warranty plan as the platform offered it with a product. */
+export interface OfferedWarranty {
+  id: string;
+  title: string;
+  kind: string;
+  price: number;
+  minPrice: number;
+  maxPrice: number;
+  durationMonths: number;
+  terms: string | null;
+}
+
+const offeredWarranties = (metadata: unknown): OfferedWarranty[] => {
+  const raw = (metadata as { product?: { warranties?: unknown } } | null)
+    ?.product?.warranties;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry): OfferedWarranty[] => {
+    const plan = entry as Record<string, unknown>;
+    if (!plan || typeof plan.id !== "string") return [];
+    return [
+      {
+        id: plan.id,
+        title: String(plan.title ?? ""),
+        kind: String(plan.kind ?? "EXTENDED"),
+        price: Math.max(0, Number(plan.price ?? 0) || 0),
+        minPrice: Math.max(0, Number(plan.minPrice ?? 0) || 0),
+        maxPrice: Math.max(0, Number(plan.maxPrice ?? 0) || 0),
+        durationMonths: Math.max(0, Math.trunc(Number(plan.durationMonths ?? 0) || 0)),
+        terms: typeof plan.terms === "string" ? plan.terms : null,
+      },
+    ];
+  });
+};
+
+/** Offered at this line's rent: a plan is priced for a band of rents. */
+const offeredAt = (plan: OfferedWarranty, unitPrice: number) =>
+  unitPrice >= plan.minPrice && unitPrice <= plan.maxPrice;
+
+/** The plan chosen for a line, as it was when it was chosen. */
+const chosenWarranty = (metadata: unknown): OfferedWarranty | null => {
+  const chosen = (metadata as { warranty?: unknown } | null)?.warranty;
+  if (!chosen || typeof chosen !== "object") return null;
+  return offeredWarranties({ product: { warranties: [chosen] } })[0] ?? null;
+};
+
+/** What the chosen plan costs for the quantity on the line. */
+const warrantyAmount = (line: { quantity: number; metadata: unknown }) =>
+  Math.round((chosenWarranty(line.metadata)?.price ?? 0) * Math.max(1, line.quantity) * 100) / 100;
+
 /** How long a cart may sit untouched before its units go back on the floor. */
 export const CART_TTL_MS = 8 * 60 * 60 * 1000;
 const expiry = () => new Date(Date.now() + CART_TTL_MS);
@@ -172,8 +221,19 @@ export const presentCart = (cart: LoadedCart) => ({
   depositTotal: number(cart.depositTotal),
   creditTotal: number(cart.creditTotal),
   grandTotal: number(cart.grandTotal),
+  warrantyTotal:
+    Math.round(
+      cart.lines.reduce((total, line) => total + warrantyAmount(line), 0) * 100,
+    ) / 100,
   lines: cart.lines.map((line) => ({
     ...line,
+    // The plan sold with the line, and the ones still on offer at its rent.
+    warranty: chosenWarranty(line.metadata)
+      ? { ...chosenWarranty(line.metadata), total: warrantyAmount(line) }
+      : null,
+    availableWarranties: offeredWarranties(line.metadata).filter((plan) =>
+      offeredAt(plan, number(line.unitPrice)),
+    ),
     unitPrice: number(line.unitPrice),
     originalUnitPrice:
       line.originalUnitPrice === null ? null : number(line.originalUnitPrice),
@@ -259,6 +319,7 @@ const reprice = async (
         line.originalUnitPrice === null ? null : number(line.originalUnitPrice),
       feeAmount: number(line.feeAmount),
       depositAmount: number(line.depositAmount),
+      warrantyAmount: warrantyAmount(line),
       rentalTenure: line.rentalTenure,
     })),
     taxRate,
@@ -353,8 +414,58 @@ export const findOrCreateCart = async (
   return presentCart(created);
 };
 
+/**
+ * A line records the warranty plans its product offered at the moment it was
+ * added. A cart that was already open when warranties were introduced - carts
+ * live for hours - holds lines from before, and so offers nothing on them for
+ * the rest of the shift. Those lines are brought up to date here, once, from
+ * the platform: only the list of plans is written, nothing about price, tax or
+ * the unit changes, and a platform that cannot answer simply leaves the line as
+ * it was.
+ */
+const refreshWarrantyOffers = async (session: StaffSession, cart: LoadedCart) => {
+  if (cart.status !== "OPEN" && cart.status !== "HELD") return cart;
+  const stale = cart.lines.filter((line) => {
+    const product = (line.metadata as { product?: { warranties?: unknown } } | null)
+      ?.product;
+    return product && typeof product === "object" && product.warranties === undefined;
+  });
+  if (stale.length === 0) return cart;
+
+  let changed = false;
+  for (const line of stale) {
+    try {
+      const { product } = await getAdapter(session.tenantId).resolveSellable(
+        session,
+        { productId: line.externalProductId },
+      );
+      const offered = product.metadata?.warranties;
+      if (!Array.isArray(offered)) continue;
+      const metadata = fulfilmentRecord(line.metadata);
+      await prisma.cartLine.update({
+        where: { id: line.id },
+        data: {
+          metadata: json({
+            ...metadata,
+            product: { ...(metadata.product as Record<string, unknown>), warranties: offered },
+          }),
+        },
+      });
+      changed = true;
+    } catch {
+      // Leave the line as it was; the next load tries again.
+    }
+  }
+  return changed ? ownedCart(session, cart.id, ["OPEN", "HELD"]) : cart;
+};
+
 export const getCart = async (session: StaffSession, id: string) =>
-  presentCart(await ownedCart(session, id, ["OPEN", "HELD", "COMPLETED"]));
+  presentCart(
+    await refreshWarrantyOffers(
+      session,
+      await ownedCart(session, id, ["OPEN", "HELD", "COMPLETED"]),
+    ),
+  );
 
 export interface AddLineInput {
   productId: string;
@@ -570,7 +681,7 @@ export const updateLine = async (
   session: StaffSession,
   cartId: string,
   lineId: string,
-  input: { note?: string | null },
+  input: { note?: string | null; warrantyId?: string | null },
   correlationId: string,
 ) => {
   await ownedCart(session, cartId, ["OPEN"]);
@@ -579,30 +690,81 @@ export const updateLine = async (
     if (!line) throw new ApiError("Cart line not found", 404, "LINE_NOT_FOUND");
 
     const metadata = fulfilmentRecord(line.metadata);
+    const next: Record<string, unknown> = { ...metadata };
+    const warrantyChanged = input.warrantyId !== undefined;
+    const noteChanged = input.note !== undefined;
+    const previous = chosenWarranty(line.metadata);
+    let plan: OfferedWarranty | null = null;
+
+    // Choosing, changing or removing a warranty. The plan must be one the
+    // product offers and must be offered at this line's rent; the platform
+    // checks it again, against its own records, when the sale is committed.
+    if (warrantyChanged) {
+      if (input.warrantyId !== null) {
+        plan =
+          offeredWarranties(line.metadata).find(
+            (candidate) => candidate.id === input.warrantyId,
+          ) ?? null;
+        if (!plan || !offeredAt(plan, number(line.unitPrice))) {
+          throw new ApiError(
+            "That warranty is not offered with this rental",
+            422,
+            "WARRANTY_NOT_OFFERED",
+          );
+        }
+      }
+      if (plan) next.warranty = plan;
+      else delete next.warranty;
+    }
+
+    // Only a request that names the note touches it: a warranty change must
+    // not wipe the line's note.
     const note = input.note?.trim() || null;
+    if (noteChanged) next.additionalNote = note;
+    if (!warrantyChanged && !noteChanged) return;
+
     await tx.cartLine.update({
       where: { id: lineId },
-      data: { metadata: json({ ...metadata, additionalNote: note }) },
+      data: { metadata: json(next) },
     });
-    await tx.auditEvent.create({
-      data: {
-        tenantId: session.tenantId,
-        storeId: session.storeId,
-        userId: session.userId,
-        entityType: "cart",
-        entityId: cartId,
-        action: "line.note_changed",
-        correlationId,
-        before: json({
-          lineId,
-          note:
-            typeof metadata.additionalNote === "string"
-              ? metadata.additionalNote
-              : null,
-        }),
-        after: json({ lineId, note }),
-      },
-    });
+    if (warrantyChanged) await reprice(tx, cartId);
+
+    if (warrantyChanged) {
+      await tx.auditEvent.create({
+        data: {
+          tenantId: session.tenantId,
+          storeId: session.storeId,
+          userId: session.userId,
+          entityType: "cart",
+          entityId: cartId,
+          action: "line.warranty_changed",
+          correlationId,
+          before: json({ lineId, warrantyId: previous?.id ?? null }),
+          after: json({ lineId, warrantyId: plan?.id ?? null }),
+        },
+      });
+    }
+    if (noteChanged) {
+      await tx.auditEvent.create({
+        data: {
+          tenantId: session.tenantId,
+          storeId: session.storeId,
+          userId: session.userId,
+          entityType: "cart",
+          entityId: cartId,
+          action: "line.note_changed",
+          correlationId,
+          before: json({
+            lineId,
+            note:
+              typeof metadata.additionalNote === "string"
+                ? metadata.additionalNote
+                : null,
+          }),
+          after: json({ lineId, note }),
+        },
+      });
+    }
   });
   return getCart(session, cartId);
 };
@@ -1155,6 +1317,12 @@ export const checkout = async (
       rentalStart: line.rentalStart?.toISOString() ?? null,
       rentalEnd: line.rentalEnd?.toISOString() ?? null,
       rentalTenure: line.rentalTenure,
+      warranty: chosenWarranty(line.metadata)
+        ? {
+            id: chosenWarranty(line.metadata)!.id,
+            price: warrantyAmount(line),
+          }
+        : null,
       metadata: line.metadata as Record<string, unknown>,
     })),
     payments: cart.payments.map((payment) => ({
@@ -1170,6 +1338,10 @@ export const checkout = async (
       discount: number(cart.discountTotal),
       tax: number(cart.taxTotal),
       fees: number(cart.feeTotal),
+      warranty:
+        Math.round(
+          cart.lines.reduce((total, line) => total + warrantyAmount(line), 0) * 100,
+        ) / 100,
       shipping: shippingFromFulfilment(cart.fulfilment),
       customCharge: customFromFulfilment(cart.fulfilment),
       deposit: number(cart.depositTotal),
