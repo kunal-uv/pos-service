@@ -122,9 +122,20 @@ const chosenWarranty = (metadata: unknown): OfferedWarranty | null => {
   return offeredWarranties({ product: { warranties: [chosen] } })[0] ?? null;
 };
 
-/** What the chosen plan costs for the quantity on the line. */
-const warrantyAmount = (line: { quantity: number; metadata: unknown }) =>
-  Math.round((chosenWarranty(line.metadata)?.price ?? 0) * Math.max(1, line.quantity) * 100) / 100;
+/**
+ * The plan that applies to a line: the one the cashier chose, otherwise the
+ * free Base cover on offer at the line's rent, which needs no choosing.
+ */
+const appliedWarranty = (line: { metadata: unknown; unitPrice: Prisma.Decimal | number | string }): OfferedWarranty | null =>
+  chosenWarranty(line.metadata) ??
+  offeredWarranties(line.metadata).find(
+    (plan) => plan.kind === "BASE" && offeredAt(plan, number(line.unitPrice)),
+  ) ??
+  null;
+
+/** What the applied plan costs for the quantity on the line. */
+const warrantyAmount = (line: { quantity: number; metadata: unknown; unitPrice: Prisma.Decimal | number | string }) =>
+  Math.round((appliedWarranty(line)?.price ?? 0) * Math.max(1, line.quantity) * 100) / 100;
 
 /** How long a cart may sit untouched before its units go back on the floor. */
 export const CART_TTL_MS = 8 * 60 * 60 * 1000;
@@ -180,11 +191,12 @@ export const presentCart = (cart: LoadedCart) => ({
   lines: cart.lines.map((line) => ({
     ...line,
     // The plan sold with the line, and the ones still on offer at its rent.
-    warranty: chosenWarranty(line.metadata)
-      ? { ...chosenWarranty(line.metadata), total: warrantyAmount(line) }
+    warranty: appliedWarranty(line)
+      ? { ...appliedWarranty(line), total: warrantyAmount(line) }
       : null,
-    availableWarranties: offeredWarranties(line.metadata).filter((plan) =>
-      offeredAt(plan, number(line.unitPrice)),
+    // Free Base cover is added on its own, so only paid plans are offered.
+    availableWarranties: offeredWarranties(line.metadata).filter(
+      (plan) => plan.kind !== "BASE" && offeredAt(plan, number(line.unitPrice)),
     ),
     unitPrice: number(line.unitPrice),
     originalUnitPrice:
@@ -1071,9 +1083,9 @@ export const checkout = async (
       rentalStart: line.rentalStart?.toISOString() ?? null,
       rentalEnd: line.rentalEnd?.toISOString() ?? null,
       rentalTenure: line.rentalTenure,
-      warranty: chosenWarranty(line.metadata)
+      warranty: appliedWarranty(line)
         ? {
-            id: chosenWarranty(line.metadata)!.id,
+            id: appliedWarranty(line)!.id,
             price: warrantyAmount(line),
           }
         : null,
