@@ -94,6 +94,22 @@ export class RentBuddyzAdapter implements PlatformAdapter {
 		);
 	}
 
+	async sendCustomerEmailCode(session: StaffSession, email: string): Promise<void> {
+		await this.request<unknown>(
+			withQuery(`${this.baseUrl}/admin/pos/customers/email-code`, { store_id: session.storeId }),
+			session.token,
+			{ method: "POST", body: JSON.stringify({ email }) },
+		);
+	}
+
+	async verifyCustomerEmailCode(session: StaffSession, email: string, code: string): Promise<void> {
+		await this.request<unknown>(
+			withQuery(`${this.baseUrl}/admin/pos/customers/email-verify`, { store_id: session.storeId }),
+			session.token,
+			{ method: "POST", body: JSON.stringify({ email, code }) },
+		);
+	}
+
 	/**
 	 * A replacement credit, as Rent Buddy recorded it when the old machine came
 	 * back over the counter. One that has already been spent is not returned at

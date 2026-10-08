@@ -9,6 +9,7 @@ test("prices the current rental period and deposit without charging the full ten
 		discountTotal: 20,
 		taxTotal: 9.1,
 		feeTotal: 0,
+		warrantyTotal: 0,
 		shippingTotal: 0,
 		depositTotal: 50,
 		creditTotal: 0,
@@ -37,6 +38,7 @@ test("a rental line bills recurring add-ons every period and one-off add-ons onc
 		// Tax falls on the period charge and the one-off fee, never the deposit.
 		taxTotal: 276,
 		feeTotal: 120,
+		warrantyTotal: 0,
 		shippingTotal: 0,
 		depositTotal: 1500,
 		creditTotal: 0,
@@ -58,6 +60,7 @@ test("removed optional recurring and one-time fees no longer affect tax or amoun
 		discountTotal: 400,
 		taxTotal: 243.6,
 		feeTotal: 0,
+		warrantyTotal: 0,
 		shippingTotal: 0,
 		depositTotal: 1500,
 		creditTotal: 0,
@@ -76,6 +79,7 @@ test("delivery shipping is included and taxed using the store rate", () => {
 		discountTotal: 0,
 		taxTotal: 15,
 		feeTotal: 20,
+		warrantyTotal: 0,
 		shippingTotal: 30,
 		depositTotal: 50,
 		creditTotal: 0,
@@ -102,4 +106,20 @@ test("a credit comes off the total after tax, and never more than the sale", () 
 	// A credit worth more than the sale covers it; the till gives no change.
 	assert.equal(covered.totals.creditTotal, 110);
 	assert.equal(covered.totals.grandTotal, 0);
+});
+
+test("a warranty is part of the sale and is taxed with the rental it covers", () => {
+	const result = priceLines([{ quantity: 1, unitPrice: 100, warrantyAmount: 25, depositAmount: 50 }], 0.1);
+	assert.equal(result.totals.subtotal, 100);
+	assert.equal(result.totals.warrantyTotal, 25);
+	// 10% of (100 + 25); the deposit is not taxed.
+	assert.equal(result.totals.taxTotal, 12.5);
+	assert.equal(result.totals.grandTotal, 187.5);
+	assert.equal(result.lines[0]?.lineTotal, 187.5);
+});
+
+test("a sale without a warranty is priced exactly as before", () => {
+	const result = priceLines([{ quantity: 1, unitPrice: 100, depositAmount: 50 }], 0.1);
+	assert.equal(result.totals.warrantyTotal, 0);
+	assert.equal(result.totals.grandTotal, 160);
 });
