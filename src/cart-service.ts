@@ -133,6 +133,12 @@ const appliedWarranty = (line: { metadata: unknown; unitPrice: Prisma.Decimal | 
   ) ??
   null;
 
+/** How the cashier said this one item goes out; null means the order's own. */
+const lineFulfilment = (metadata: unknown): "pickup" | "delivery" | null => {
+  const value = (metadata as { lineFulfilment?: unknown } | null)?.lineFulfilment;
+  return value === "pickup" || value === "delivery" ? value : null;
+};
+
 /** What the applied plan costs for the quantity on the line. */
 const warrantyAmount = (line: { quantity: number; metadata: unknown; unitPrice: Prisma.Decimal | number | string }) =>
   Math.round((appliedWarranty(line)?.price ?? 0) * Math.max(1, line.quantity) * 100) / 100;
@@ -195,6 +201,7 @@ export const presentCart = (cart: LoadedCart) => ({
       ? { ...appliedWarranty(line), total: warrantyAmount(line) }
       : null,
     // Free Base cover is added on its own, so only paid plans are offered.
+    fulfilment: lineFulfilment(line.metadata),
     availableWarranties: offeredWarranties(line.metadata).filter(
       (plan) => plan.kind !== "BASE" && offeredAt(plan, number(line.unitPrice)),
     ),
@@ -631,7 +638,11 @@ export const updateLine = async (
   session: StaffSession,
   cartId: string,
   lineId: string,
-  input: { note?: string | null; warrantyId?: string | null },
+  input: {
+    note?: string | null;
+    warrantyId?: string | null;
+    fulfilment?: "pickup" | "delivery" | null;
+  },
   correlationId: string,
 ) => {
   await ownedCart(session, cartId, ["OPEN"]);
@@ -671,7 +682,14 @@ export const updateLine = async (
     // not wipe the line's note.
     const note = input.note?.trim() || null;
     if (noteChanged) next.additionalNote = note;
-    if (!warrantyChanged && !noteChanged) return;
+    // How this item goes out: one order may mix pickup and delivery lines.
+    // Only a plain label on the line - nothing is repriced by it.
+    const fulfilmentChanged = input.fulfilment !== undefined;
+    if (fulfilmentChanged) {
+      if (input.fulfilment) next.lineFulfilment = input.fulfilment;
+      else delete next.lineFulfilment;
+    }
+    if (!warrantyChanged && !noteChanged && !fulfilmentChanged) return;
 
     await tx.cartLine.update({
       where: { id: lineId },
@@ -1083,6 +1101,7 @@ export const checkout = async (
       rentalStart: line.rentalStart?.toISOString() ?? null,
       rentalEnd: line.rentalEnd?.toISOString() ?? null,
       rentalTenure: line.rentalTenure,
+      fulfilment: lineFulfilment(line.metadata),
       warranty: appliedWarranty(line)
         ? {
             id: appliedWarranty(line)!.id,
