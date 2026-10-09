@@ -7,7 +7,7 @@ export const customersRouter = Router();
 
 customersRouter.get("/", async (request, response, next) => {
 	try {
-		const { search } = z.object({ search: z.string().trim().min(2).max(100) }).parse(request.query);
+		const { search } = z.object({ search: z.string().trim().max(100).default("") }).parse(request.query);
 		const session = sessionOf(request);
 		const data = await getAdapter(session.tenantId).searchCustomers(session, search);
 		response.json({ success: true, data });
