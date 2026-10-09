@@ -152,6 +152,8 @@ export interface PlatformCheckoutLine {
 	rentalTenure: number | null;
 	/** The warranty plan chosen for this line, and what it costs for the quantity on it. */
 	warranty?: { id: string; price: number } | null;
+	/** How this item goes out; null means the order's own method. */
+	fulfilment?: "pickup" | "delivery" | null;
 	metadata: Record<string, unknown>;
 }
 
