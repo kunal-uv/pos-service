@@ -2,6 +2,7 @@ import { config } from "../config.js";
 import { ApiError } from "../errors.js";
 import { upstreamRequest, withQuery } from "../http.js";
 import type {
+	AgreementPreview,
 	CatalogProduct,
 	CatalogQuery,
 	CustomerAddress,
@@ -168,6 +169,17 @@ export class RentBuddyzAdapter implements PlatformAdapter {
 			withQuery(`${this.baseUrl}/admin/pos/checkout`, { store_id: session.storeId }),
 			session.token,
 			{ method: "POST", body: JSON.stringify(checkout) },
+		);
+	}
+
+	async previewAgreement(
+		session: StaffSession,
+		input: Parameters<NonNullable<PlatformAdapter["previewAgreement"]>>[1],
+	): Promise<AgreementPreview> {
+		return this.request<AgreementPreview>(
+			withQuery(`${this.baseUrl}/admin/pos/agreement-preview`, { store_id: session.storeId }),
+			session.token,
+			{ method: "POST", body: JSON.stringify(input) },
 		);
 	}
 }

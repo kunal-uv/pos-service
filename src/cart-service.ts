@@ -3,6 +3,7 @@ import { CartStatus, Prisma } from "@prisma/client";
 import { getAdapter } from "./adapters/index.js";
 import { prisma } from "./db.js";
 import { ApiError } from "./errors.js";
+import { agreementLines, withoutAgreementAcceptance } from "./agreement.js";
 import { priceLines } from "./pricing.js";
 import type {
   PlatformCheckout,
@@ -304,6 +305,27 @@ const ownedCart = async (
       "CART_NOT_FOUND",
     );
   return cart;
+};
+
+/**
+ * Drops a stale agreement acceptance. Called only from the mutators that
+ * change what the agreement says (lines, customer), never from a plain
+ * fulfilment PATCH, so it cannot fight the till saving its own acceptance.
+ */
+const clearAgreementAcceptance = async (
+  tx: Prisma.TransactionClient,
+  cartId: string,
+) => {
+  const current = await tx.cart.findUnique({
+    where: { id: cartId },
+    select: { fulfilment: true },
+  });
+  if (fulfilmentRecord(current?.fulfilment).agreementAccepted === undefined)
+    return;
+  await tx.cart.update({
+    where: { id: cartId },
+    data: { fulfilment: json(withoutAgreementAcceptance(current?.fulfilment)) },
+  });
 };
 
 /**
@@ -633,6 +655,7 @@ export const addLine = async (
         },
       });
       await reprice(tx, cartId);
+      await clearAgreementAcceptance(tx, cartId);
       await tx.auditEvent.create({
         data: {
           tenantId: session.tenantId,
@@ -680,6 +703,7 @@ export const removeLine = async (
     if (removed.count !== 1)
       throw new ApiError("Cart line not found", 404, "LINE_NOT_FOUND");
     await reprice(tx, cartId);
+    await clearAgreementAcceptance(tx, cartId);
     await tx.auditEvent.create({
       data: {
         tenantId: session.tenantId,
@@ -947,8 +971,17 @@ export const updateCart = async (
       where: { id: cartId },
       select: { fulfilment: true },
     });
-    const fulfilment =
+    const baseFulfilment =
       input.fulfilment !== undefined ? input.fulfilment : current.fulfilment;
+    // A different customer means a different agreement. Re-selecting the same
+    // customer, or any edit that leaves the customer alone, keeps the
+    // acceptance - including one the till sets in this same PATCH.
+    const customerChanged =
+      Boolean(input.customer) &&
+      input.customer!.id !== existingCart.customerId;
+    const fulfilment = customerChanged
+      ? withoutAgreementAcceptance(baseFulfilment)
+      : baseFulfilment;
     await tx.cart.update({
       where: { id: cartId },
       data: {
@@ -1525,4 +1558,32 @@ export const checkout = async (
     },
   });
   return response;
+};
+
+/**
+ * The rental agreement the customer is asked to accept, as the platform
+ * renders it for what is in the cart right now.
+ */
+export const previewCartAgreement = async (
+  session: StaffSession,
+  cartId: string,
+) => {
+  const cart = await ownedCart(session, cartId, ["OPEN", "HELD"]);
+  if (!cart.customerId || !cart.lines.length)
+    throw new ApiError(
+      "Pick a customer and add a rental item first",
+      409,
+      "AGREEMENT_NOT_READY",
+    );
+  const adapter = getAdapter(session.tenantId);
+  if (!adapter.previewAgreement)
+    return {
+      available: false as const,
+      reason: "UNSUPPORTED",
+      message: "This platform does not use rental agreements",
+    };
+  return adapter.previewAgreement(session, {
+    customerId: cart.customerId,
+    lines: agreementLines(cart.lines),
+  });
 };

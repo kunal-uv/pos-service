@@ -56,6 +56,12 @@ export interface PosCapabilities {
 	 */
 	partialPayment?: boolean;
 	/**
+	 * The till must collect a mandatory rental-agreement acceptance before
+	 * payment: it shows the agreement the platform renders and requires a
+	 * ticked checkbox, sent as `fulfilment.agreementAccepted`.
+	 */
+	agreement?: boolean;
+	/**
 	 * Cash may be over-tendered and change given. Display and receipt only: the
 	 * payment recorded against the sale is what was APPLIED, never the note
 	 * handed across.
@@ -205,6 +211,10 @@ export interface PlatformCheckoutResult {
 	snapshot: Record<string, unknown>;
 }
 
+export type AgreementPreview =
+	| { available: true; templateId: string; templateName: string; html: string }
+	| { available: false; reason: string; message: string };
+
 export interface PlatformAdapter {
 	readonly tenantId: TenantId;
 	authenticate(token: string, storeId: string): Promise<StaffSession>;
@@ -224,6 +234,14 @@ export interface PlatformAdapter {
 	sendCustomerEmailCode?(session: StaffSession, email: string): Promise<void>;
 	verifyCustomerEmailCode?(session: StaffSession, email: string, code: string): Promise<void>;
 	commitCheckout(session: StaffSession, checkout: PlatformCheckout): Promise<PlatformCheckoutResult>;
+	/** The rental agreement for this customer and these lines. Absent where the platform has none. */
+	previewAgreement?(
+		session: StaffSession,
+		input: {
+			customerId: string;
+			lines: Array<{ productId: string; quantity: number; rentalTenure: number; unitPrice: number; depositAmount: number }>;
+		},
+	): Promise<AgreementPreview>;
 	/**
 	 * Whether this customer is exempt from sales tax, as the platform decides it.
 	 *
