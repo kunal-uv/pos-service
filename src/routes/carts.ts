@@ -9,6 +9,7 @@ import {
   getCart,
   holdCart,
   listHeldCarts,
+  previewCartAgreement,
   removeLine,
   resumeCart,
   replacePayments,
@@ -57,7 +58,18 @@ cartsRouter.get("/:id", async (request, response, next) => {
   }
 });
 
-cartsRouter.patch("/:id", async (request, response, next) => {
+cartsRouter.get("/:id/agreement", async (request, response, next) => {
+  try {
+    response.json({
+      success: true,
+      data: await previewCartAgreement(sessionOf(request), request.params.id),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+cartsRouter.patch("/:id",async (request, response, next) => {
   try {
     const body = z
       .object({
