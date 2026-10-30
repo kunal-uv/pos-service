@@ -95,6 +95,18 @@ export class RentBuddyzAdapter implements PlatformAdapter {
 		);
 	}
 
+	async getCustomer(session: StaffSession, customerId: string): Promise<CustomerSummary> {
+		const result = await this.request<{customer: CustomerSummary}>(
+			withQuery(`${this.baseUrl}/admin/pos/customers/${encodeURIComponent(customerId)}`, {store_id: session.storeId}), session.token);
+		return result.customer;
+	}
+
+	async updateCustomer(session: StaffSession, customerId: string, input: Record<string, unknown>): Promise<CustomerSummary> {
+		return this.request<CustomerSummary>(
+			withQuery(`${this.baseUrl}/admin/pos/customers/${encodeURIComponent(customerId)}`, {store_id: session.storeId}),
+			session.token, {method: "PATCH", body: JSON.stringify(input)});
+	}
+
 	async sendCustomerEmailCode(session: StaffSession, email: string): Promise<void> {
 		await this.request<unknown>(
 			withQuery(`${this.baseUrl}/admin/pos/customers/email-code`, { store_id: session.storeId }),

@@ -9,6 +9,7 @@ import { cartsRouter } from "./routes/carts.js";
 import { catalogRouter } from "./routes/catalog.js";
 import { customersRouter } from "./routes/customers.js";
 import { sessionRouter } from "./routes/session.js";
+import { layawaysRouter } from "./routes/layaways.js";
 
 /**
  * A till is not always reached on the origin somebody wrote into `CORS_ORIGINS`.
@@ -76,6 +77,9 @@ export const createApp = () => {
 	app.use("/v1/catalog", catalogRouter);
 	app.use("/v1/customers", customersRouter);
 	app.use("/v1/carts", cartsRouter);
+	app.use("/v1/layaways", layawaysRouter);
+	// Compatibility for clients/proxies that use the unversioned cart URL.
+	app.use("/carts", authenticate, cartsRouter);
 	app.use(notFound);
 	app.use(errorHandler);
 	return app;

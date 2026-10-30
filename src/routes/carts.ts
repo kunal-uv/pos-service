@@ -160,6 +160,8 @@ cartsRouter.patch("/:id/lines/:lineId", async (request, response, next) => {
         note: z.string().max(2000).nullable().optional(),
         // The warranty plan sold with this line; null takes it off.
         warrantyId: z.string().min(1).max(40).nullable().optional(),
+        standardWarrantyId: z.string().min(1).max(40).optional(),
+        warrantyPrice: z.number().finite().min(0).max(1000000).optional(),
         // How this item goes out; null goes back to the order's own method.
         fulfilment: z.enum(["pickup", "delivery"]).nullable().optional(),
       })

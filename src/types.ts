@@ -8,6 +8,7 @@ export interface StaffSession {
 	userId: string;
 	roleId: string | null;
 	displayName: string | null;
+	timeZone?: string;
 	permissions: string[];
 	currency: string;
 	/** The combined rate every cart is priced with. */
@@ -158,6 +159,7 @@ export interface PlatformCheckoutLine {
 	rentalTenure: number | null;
 	/** The warranty plan chosen for this line, and what it costs for the quantity on it. */
 	warranty?: { id: string; price: number } | null;
+	standardWarranty?: {id: string} | null;
 	/** How this item goes out; null means the order's own method. */
 	fulfilment?: "pickup" | "delivery" | null;
 	metadata: Record<string, unknown>;
@@ -227,6 +229,8 @@ export interface PlatformAdapter {
 	searchCustomers(session: StaffSession, search: string): Promise<CustomerSummary[]>;
 	getCustomerAddresses(session: StaffSession, customerId: string): Promise<CustomerAddress[]>;
 	createCustomer(session: StaffSession, input: Record<string, unknown>): Promise<CustomerSummary>;
+	getCustomer?(session: StaffSession, customerId: string): Promise<CustomerSummary>;
+	updateCustomer?(session: StaffSession, customerId: string, input: Record<string, unknown>): Promise<CustomerSummary>;
 	/**
 	 * Proving a new customer's email with an emailed code, for platforms whose
 	 * New Customer form asks for it. Absent on a platform that does not.

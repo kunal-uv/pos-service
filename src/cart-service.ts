@@ -171,12 +171,14 @@ const chosenWarranty = (metadata: unknown): OfferedWarranty | null => {
  * The plan that applies to a line: the one the cashier chose, otherwise the
  * free Base cover on offer at the line's rent, which needs no choosing.
  */
-const appliedWarranty = (line: { metadata: unknown; unitPrice: Prisma.Decimal | number | string }): OfferedWarranty | null =>
-  chosenWarranty(line.metadata) ??
-  offeredWarranties(line.metadata).find(
-    (plan) => plan.kind === "BASE" && offeredAt(plan, number(line.unitPrice)),
-  ) ??
-  null;
+const appliedStandardWarranty = (line: {metadata: unknown}): OfferedWarranty | null => {
+  const selected = fulfilmentRecord(line.metadata).standardWarranty;
+  const saved = selected ? offeredWarranties({product: {warranties: [selected]}})[0] : null;
+  const legacy = chosenWarranty(line.metadata);
+  return saved ?? (legacy?.kind === "BASE" ? legacy : null) ?? offeredWarranties(line.metadata).find((plan) => plan.kind === "BASE") ?? null;
+};
+const appliedWarranty = (line: {metadata: unknown; unitPrice: Prisma.Decimal | number | string}): OfferedWarranty | null =>
+  chosenWarranty(line.metadata) ?? appliedStandardWarranty(line);
 
 /** How the cashier said this one item goes out; null means the order's own. */
 const lineFulfilment = (metadata: unknown): "pickup" | "delivery" | null => {
@@ -205,7 +207,7 @@ const expiry = () => new Date(Date.now() + CART_TTL_MS);
 export const releaseStaleCarts = async () => {
   const staleBefore = new Date(Date.now() - CART_TTL_MS);
   const stale = await prisma.cart.findMany({
-    where: { status: "OPEN", updatedAt: { lt: staleBefore } },
+    where: { status: "OPEN", updatedAt: { lt: staleBefore }, payments: {none: {status: "CAPTURED"}} },
     select: { id: true },
   });
   if (!stale.length) return 0;
@@ -249,10 +251,11 @@ export const presentCart = (cart: LoadedCart) => ({
     warranty: appliedWarranty(line)
       ? { ...appliedWarranty(line), total: warrantyAmount(line) }
       : null,
+    standardWarranty: appliedStandardWarranty(line),
     // Free Base cover is added on its own, so only paid plans are offered.
     fulfilment: lineFulfilment(line.metadata),
     availableWarranties: offeredWarranties(line.metadata).filter(
-      (plan) => plan.kind !== "BASE" && offeredAt(plan, number(line.unitPrice)),
+      (plan) => plan.kind === "BASE" || offeredAt(plan, number(line.unitPrice)),
     ),
     unitPrice: number(line.unitPrice),
     originalUnitPrice:
@@ -727,6 +730,8 @@ export const updateLine = async (
   input: {
     note?: string | null;
     warrantyId?: string | null;
+    warrantyPrice?: number;
+    standardWarrantyId?: string;
     fulfilment?: "pickup" | "delivery" | null;
   },
   correlationId: string,
@@ -742,6 +747,12 @@ export const updateLine = async (
     const noteChanged = input.note !== undefined;
     const previous = chosenWarranty(line.metadata);
     let plan: OfferedWarranty | null = null;
+    const standardChanged = input.standardWarrantyId !== undefined;
+    if (standardChanged) {
+      const standard = offeredWarranties(line.metadata).find((candidate) => candidate.id === input.standardWarrantyId && candidate.kind === "BASE");
+      if (!standard) throw new ApiError("That standard warranty is not offered with this product", 422, "WARRANTY_NOT_OFFERED");
+      next.standardWarranty = standard;
+    }
 
     // Choosing, changing or removing a warranty. The plan must be one the
     // product offers and must be offered at this line's rent; the platform
@@ -761,7 +772,13 @@ export const updateLine = async (
         }
       }
       if (plan) next.warranty = plan;
-      else delete next.warranty;
+      if (plan && input.warrantyPrice !== undefined) {
+        if (session.tenantId !== "rent-buddyz") throw new ApiError("Price override unavailable", 422, "UNSUPPORTED");
+        const price = Math.round(input.warrantyPrice * 100) / 100;
+        if (plan.kind.toUpperCase() === "BASE" && price !== 0) throw new ApiError("Standard warranty is free", 422, "INVALID_WARRANTY_PRICE");
+        next.warranty = {...plan, price};
+      }
+      if (!plan) delete next.warranty;
     }
 
     // Only a request that names the note touches it: a warranty change must
@@ -775,15 +792,18 @@ export const updateLine = async (
       if (input.fulfilment) next.lineFulfilment = input.fulfilment;
       else delete next.lineFulfilment;
     }
-    if (!warrantyChanged && !noteChanged && !fulfilmentChanged) return;
+    if (!warrantyChanged && !standardChanged && !noteChanged && !fulfilmentChanged) return;
 
     await tx.cartLine.update({
       where: { id: lineId },
       data: { metadata: json(next) },
     });
-    if (warrantyChanged) await reprice(tx, cartId);
+    if (warrantyChanged || standardChanged) {
+      await clearAgreementAcceptance(tx, cartId);
+      await reprice(tx, cartId);
+    }
 
-    if (warrantyChanged) {
+    if (warrantyChanged || standardChanged) {
       await tx.auditEvent.create({
         data: {
           tenantId: session.tenantId,
@@ -793,8 +813,8 @@ export const updateLine = async (
           entityId: cartId,
           action: "line.warranty_changed",
           correlationId,
-          before: json({ lineId, warrantyId: previous?.id ?? null }),
-          after: json({ lineId, warrantyId: plan?.id ?? null }),
+          before: json({ lineId, warrantyId: previous?.id ?? null, price: previous?.price ?? null }),
+          after: json({ lineId, warrantyId: plan?.id ?? null, standardWarrantyId: fulfilmentRecord(next.standardWarranty).id ?? null, price: fulfilmentRecord(next.warranty).price ?? null }),
         },
       });
     }
@@ -966,13 +986,34 @@ export const updateCart = async (
         input.customer.id,
       )) ?? null)
     : undefined;
+  /**
+   * Refused here as well as at checkout, so the cashier hears about it on the
+   * Details step rather than after the payment has been taken.
+   */
+  const invoiceDate = fulfilmentRecord(input.fulfilment).invoiceDate;
+  if (typeof invoiceDate === "string" && invoiceDate) {
+    const shopToday = new Intl.DateTimeFormat("en-CA", {
+      timeZone: session.timeZone ?? "America/Los_Angeles",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+    if (invoiceDate > shopToday) {
+      throw new ApiError("An invoice cannot be dated in the future", 400, "INVOICE_DATE_FUTURE");
+    }
+  }
   await prisma.$transaction(async (tx) => {
     const current = await tx.cart.findUniqueOrThrow({
       where: { id: cartId },
       select: { fulfilment: true },
     });
-    const baseFulfilment =
-      input.fulfilment !== undefined ? input.fulfilment : current.fulfilment;
+    const baseFulfilment = {...fulfilmentRecord(input.fulfilment !== undefined ? input.fulfilment : current.fulfilment),
+      ...(fulfilmentRecord(current.fulfilment).layaway ? {layaway: fulfilmentRecord(current.fulfilment).layaway} : {})};
+    // Financial approvals are server-owned; callers cannot introduce them in a PATCH.
+    if (!fulfilmentRecord(current.fulfilment).layaway) delete baseFulfilment.layaway;
+    if (fulfilmentRecord(current.fulfilment).layaway && input.customer && input.customer.id !== existingCart.customerId) {
+      throw new ApiError("A deposit belongs to the layaway customer; cancel the layaway to change customers", 409, "CUSTOMER_LOCKED");
+    }
     // A different customer means a different agreement. Re-selecting the same
     // customer, or any edit that leaves the customer alone, keeps the
     // acceptance - including one the till sets in this same PATCH.
@@ -1132,7 +1173,7 @@ export const listHeldCarts = async (session: StaffSession) => {
     take: 50,
   });
 
-  return carts.map((cart) => {
+  return carts.filter((cart) => !fulfilmentRecord(cart.fulfilment).layaway).map((cart) => {
     const snapshot = (cart.customerSnapshot ?? {}) as { name?: string };
 
     return {
@@ -1169,6 +1210,12 @@ export const resumeCart = async (session: StaffSession, cartId: string) => {
 
   if (!cart) {
     throw new ApiError("That parked sale was not found", 404, "CART_NOT_FOUND");
+  }
+  if (fulfilmentRecord(cart.fulfilment).layaway) {
+    const payments = await prisma.payment.findMany({where: {cartId, status: "CAPTURED"}});
+    const paid = payments.reduce((sum, payment) => sum + Math.round(number(payment.amount) * 100), 0);
+    const release = fulfilmentRecord(fulfilmentRecord(cart.fulfilment).layaway).releaseAuthorized;
+    if (paid < Math.round(number(cart.grandTotal) * 100) && !release) throw new ApiError("Pay the remaining balance before final checkout", 409, "BALANCE_DUE");
   }
 
   const resumed = await prisma.cart.updateMany({
@@ -1381,6 +1428,7 @@ export const checkout = async (
       rentalEnd: line.rentalEnd?.toISOString() ?? null,
       rentalTenure: line.rentalTenure,
       fulfilment: lineFulfilment(line.metadata),
+      standardWarranty: appliedStandardWarranty(line) ? {id: appliedStandardWarranty(line)!.id} : null,
       warranty: appliedWarranty(line)
         ? {
             id: appliedWarranty(line)!.id,
