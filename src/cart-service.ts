@@ -132,6 +132,8 @@ export interface OfferedWarranty {
   maxPrice: number;
   durationMonths: number;
   terms: string | null;
+  /** Extended plans: certificate numbers still free to sell; null for other plans. */
+  numbersLeft: number | null;
 }
 
 const offeredWarranties = (metadata: unknown): OfferedWarranty[] => {
@@ -151,6 +153,10 @@ const offeredWarranties = (metadata: unknown): OfferedWarranty[] => {
         maxPrice: Math.max(0, Number(plan.maxPrice ?? 0) || 0),
         durationMonths: Math.max(0, Math.trunc(Number(plan.durationMonths ?? 0) || 0)),
         terms: typeof plan.terms === "string" ? plan.terms : null,
+        numbersLeft:
+          plan.numbersLeft === null || plan.numbersLeft === undefined
+            ? null
+            : Math.max(0, Math.trunc(Number(plan.numbersLeft) || 0)),
       },
     ];
   });
