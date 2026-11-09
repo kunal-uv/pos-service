@@ -239,7 +239,10 @@ export interface PlatformAdapter {
 		session: StaffSession,
 		input: {
 			customerId: string;
-			lines: Array<{ productId: string; quantity: number; rentalTenure: number; unitPrice: number; depositAmount: number }>;
+			lines: Array<{
+				productId: string; quantity: number; rentalTenure: number; unitPrice: number; depositAmount: number;
+				serial?: string; rentalStart?: string; rentalEnd?: string;
+			}>;
 		},
 	): Promise<AgreementPreview>;
 	/**
