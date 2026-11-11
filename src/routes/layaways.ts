@@ -15,7 +15,7 @@ layawaysRouter.use((req, _res, next) => {
 });
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const cents = (value: unknown) => Math.round(Number(value) * 100);
-const paymentSchema = z.object({amount: z.number().finite().positive().max(10000000), method: z.enum(["cash", "debit", "credit", "interac"]), reference: z.string().trim().max(120).optional()});
+const paymentSchema = z.object({amount: z.number().finite().positive().max(10000000), method: z.enum(["cash", "credit_debit", "financing", "zelle", "certified_check", "debit", "credit", "interac"]), reference: z.string().trim().max(120).optional()});
 const include = {lines: true, payments: {orderBy: {createdAt: "asc" as const}}};
 const summary = (cart: any) => {
   const details = record(record(cart.fulfilment).layaway);

@@ -195,6 +195,20 @@ export const CART_TTL_MS = 8 * 60 * 60 * 1000;
 const expiry = () => new Date(Date.now() + CART_TTL_MS);
 
 /**
+ * How long a parked sale keeps its units before they go back on the floor.
+ *
+ * Parking holds the machines for a customer who is thinking it over. Without a
+ * limit a sale parked and forgotten (a test cart, a customer who never came
+ * back) held its units for good: the unit read Available everywhere else, yet
+ * every till was refused it with UNIT_RESERVED and nobody could see why.
+ * Layaways and anything with money taken are never released this way.
+ */
+const PARKED_TTL_MS = (() => {
+  const hours = Number(process.env.POS_PARKED_HOLD_HOURS);
+  return (Number.isFinite(hours) && hours > 0 ? hours : 24) * 60 * 60 * 1000;
+})();
+
+/**
  * Returns abandoned carts' units to the floor.
  *
  * A line holds `reservationKey`, which is unique across the whole tenant, so a
@@ -202,28 +216,197 @@ const expiry = () => new Date(Date.now() + CART_TTL_MS);
  * operator-facing way to release it and the platform's own sweep cannot see a
  * reservation this service is holding. Staleness is measured from the cart's
  * last change, not its creation: a cart being actively worked on is not stale.
- * Held carts are parked deliberately and are left alone.
+ *
+ * Open carts go after CART_TTL_MS; parked (held) sales after PARKED_TTL_MS.
+ * Layaways stay held however old they are - they are paid down over weeks.
  */
 export const releaseStaleCarts = async () => {
-  const staleBefore = new Date(Date.now() - CART_TTL_MS);
-  const stale = await prisma.cart.findMany({
-    where: { status: "OPEN", updatedAt: { lt: staleBefore }, payments: {none: {status: "CAPTURED"}} },
-    select: { id: true },
-  });
+  const unpaid = { payments: { none: { status: "CAPTURED" as const } } };
+  const [open, parked] = await Promise.all([
+    prisma.cart.findMany({
+      where: { status: "OPEN", updatedAt: { lt: new Date(Date.now() - CART_TTL_MS) }, ...unpaid },
+      select: { id: true },
+    }),
+    prisma.cart.findMany({
+      where: { status: "HELD", updatedAt: { lt: new Date(Date.now() - PARKED_TTL_MS) }, ...unpaid },
+      select: { id: true, fulfilment: true },
+    }),
+  ]);
+  const stale = [
+    ...open,
+    ...parked.filter((cart) => !fulfilmentRecord(cart.fulfilment).layaway),
+  ];
   if (!stale.length) return 0;
 
   const ids = stale.map((cart) => cart.id);
-  await prisma.$transaction([
-    prisma.cartLine.updateMany({
-      where: { cartId: { in: ids } },
+  return prisma.$transaction(async (tx) => {
+    // Re-checked inside the transaction: a sale resumed or edited since the
+    // lookup above is no longer stale and keeps its units.
+    const expired = await tx.cart.findMany({
+      where: {
+        id: { in: ids },
+        OR: [
+          { status: "OPEN", updatedAt: { lt: new Date(Date.now() - CART_TTL_MS) } },
+          { status: "HELD", updatedAt: { lt: new Date(Date.now() - PARKED_TTL_MS) } },
+        ],
+      },
+      select: { id: true },
+    });
+    const expiredIds = expired.map((cart) => cart.id);
+    if (!expiredIds.length) return 0;
+    await tx.cartLine.updateMany({
+      where: { cartId: { in: expiredIds } },
       data: { reservationKey: null },
-    }),
-    prisma.cart.updateMany({
-      where: { id: { in: ids }, status: "OPEN" },
+    });
+    await tx.cart.updateMany({
+      where: { id: { in: expiredIds } },
       data: { status: "EXPIRED" },
-    }),
-  ]);
-  return ids.length;
+    });
+    return expiredIds.length;
+  });
+};
+
+/** Where a unit is held, for a refusal staff can act on. */
+const describeHold = async (reservationKey: string): Promise<string> => {
+  const line = await prisma.cartLine.findFirst({
+    where: { reservationKey },
+    select: { cart: { select: { status: true, heldName: true, updatedAt: true, fulfilment: true } } },
+  });
+  const cart = line?.cart;
+  if (!cart) return "That unit is already reserved in another POS cart";
+  const since = cart.updatedAt.toLocaleString("en-CA", { dateStyle: "medium", timeStyle: "short" });
+  if (cart.status === "HELD") {
+    const kind = fulfilmentRecord(cart.fulfilment).layaway ? "a layaway" : "a parked sale";
+    const name = cart.heldName ? ` (“${cart.heldName}”)` : "";
+    return `That unit is held in ${kind}${name} since ${since}. Resume it from Parked sales to sell it, or remove it there.`;
+  }
+  return `That unit is already in another open POS cart (last changed ${since}). It is released automatically once that cart is left idle.`;
+};
+
+/* ── Unit holds, as the admin's Reserve & Hold page shows them ─────────── */
+
+export type HoldKind = "OPEN_CART" | "PARKED_SALE" | "LAYAWAY";
+
+/**
+ * Every unit a POS cart at this store is holding right now.
+ *
+ * These holds live only here (as `reservationKey` on a cart line), so the
+ * platform's inventory still reads the unit as Available. Without this list
+ * the only sign of one was a till being refused the unit with UNIT_RESERVED.
+ */
+export const listUnitHolds = async (session: StaffSession) => {
+  const lines = await prisma.cartLine.findMany({
+    where: {
+      reservationKey: { not: null },
+      cart: { tenantId: session.tenantId, storeId: session.storeId, status: { in: ["OPEN", "HELD"] } },
+    },
+    select: {
+      id: true, externalProductId: true, externalUnitId: true, serial: true, sku: true, name: true, imageUrl: true,
+      unitPrice: true, createdAt: true,
+      cart: {
+        select: {
+          id: true, status: true, heldName: true, userId: true, customerSnapshot: true, fulfilment: true,
+          createdAt: true, updatedAt: true, currency: true, grandTotal: true,
+          payments: { where: { status: "CAPTURED" }, select: { amount: true } },
+        },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 500,
+  });
+
+  return lines.map((line) => {
+    const { cart } = line;
+    const layaway = fulfilmentRecord(cart.fulfilment).layaway;
+    const kind: HoldKind = cart.status === "OPEN" ? "OPEN_CART" : layaway ? "LAYAWAY" : "PARKED_SALE";
+    const paid = cart.payments.reduce((sum, p) => sum + number(p.amount), 0);
+    // When the sweep would give the unit back on its own (null: it never will).
+    const releasesAt = kind === "LAYAWAY" || paid > 0
+      ? null
+      : new Date(cart.updatedAt.getTime() + (kind === "OPEN_CART" ? CART_TTL_MS : PARKED_TTL_MS));
+    const customer = (cart.customerSnapshot ?? {}) as { name?: string };
+    return {
+      lineId: line.id,
+      unitId: line.externalUnitId,
+      productId: line.externalProductId,
+      serial: line.serial,
+      sku: line.sku,
+      name: line.name,
+      imageUrl: line.imageUrl,
+      monthlyPrice: number(line.unitPrice),
+      kind,
+      cartId: cart.id,
+      label: cart.heldName,
+      customerName: customer.name ?? null,
+      staffUserId: cart.userId,
+      heldSince: line.createdAt,
+      lastActivity: cart.updatedAt,
+      releasesAt,
+      paid,
+      currency: cart.currency,
+      cartTotal: number(cart.grandTotal),
+      /** Staff may free it from the admin: never a layaway or a sale with money taken. */
+      releasable: kind !== "LAYAWAY" && paid === 0,
+    };
+  });
+};
+
+/**
+ * Frees every unit a cart holds, from the admin's Reserve & Hold page: a sale
+ * parked and forgotten, or a cart left open on a till nobody is at.
+ *
+ * ! Refused for layaways and for carts with money taken: those have their own
+ * ! cancel and refund paths in the till, and releasing them here would strand
+ * ! a customer's payment against machines someone else can now rent.
+ */
+export const releaseCartHolds = async (
+  session: StaffSession,
+  cartId: string,
+  reason: string,
+  correlationId: string,
+) => {
+  if (!session.permissions.includes("pos:manage")) {
+    throw new ApiError("Permission denied: pos.manage required", 403, "FORBIDDEN");
+  }
+  return prisma.$transaction(async (tx) => {
+    const cart = await tx.cart.findFirst({
+      where: { id: cartId, tenantId: session.tenantId, storeId: session.storeId },
+      include: { lines: true, payments: { where: { status: "CAPTURED" } } },
+    });
+    if (!cart) throw new ApiError("That POS cart was not found", 404, "CART_NOT_FOUND");
+    if (cart.status !== "OPEN" && cart.status !== "HELD") {
+      throw new ApiError("That cart no longer holds any units", 409, "NOT_HOLDING");
+    }
+    if (fulfilmentRecord(cart.fulfilment).layaway) {
+      throw new ApiError("This is a layaway. Cancel it from Layaways in the till so its payments are settled.", 409, "IS_LAYAWAY");
+    }
+    if (cart.payments.length) {
+      throw new ApiError("Money has been taken on this sale. Finish or refund it from the till instead.", 409, "HAS_PAYMENTS");
+    }
+    const held = cart.lines.filter((line) => line.reservationKey);
+    const changed = await tx.cart.updateMany({
+      where: { id: cart.id, version: cart.version, status: cart.status },
+      data: { status: "EXPIRED", version: { increment: 1 } },
+    });
+    if (changed.count !== 1) {
+      throw new ApiError("That cart changed while you were looking at it; refresh and try again", 409, "CART_VERSION_CONFLICT");
+    }
+    await tx.cartLine.updateMany({ where: { cartId: cart.id }, data: { reservationKey: null } });
+    await tx.auditEvent.create({
+      data: {
+        tenantId: session.tenantId,
+        storeId: session.storeId,
+        userId: session.userId,
+        entityType: "cart",
+        entityId: cart.id,
+        action: "holds.released",
+        correlationId,
+        before: json({ status: cart.status, heldName: cart.heldName, ownerUserId: cart.userId }),
+        after: json({ reason, units: held.map((line) => ({ unitId: line.externalUnitId, serial: line.serial, name: line.name })) }),
+      },
+    });
+    return { released: held.length };
+  });
 };
 
 export const presentCart = (cart: LoadedCart) => ({
@@ -681,11 +864,7 @@ export const addLine = async (
       error.code === "P2002" &&
       reservationKey
     ) {
-      throw new ApiError(
-        "That unit is already reserved in another POS cart",
-        409,
-        "UNIT_RESERVED",
-      );
+      throw new ApiError(await describeHold(reservationKey), 409, "UNIT_RESERVED");
     }
     throw error;
   }
