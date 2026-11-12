@@ -21,10 +21,10 @@ const summary = (cart: any) => {
   const details = record(record(cart.fulfilment).layaway);
   const paid = cart.payments.filter((p: any) => record(p.metadata).layaway === true && p.status !== "REFUNDED" && p.status !== "VOIDED").reduce((sum: number, p: any) => sum + cents(p.amount), 0);
   return {id: cart.id, name: cart.heldName, customerName: record(cart.customerSnapshot).name ?? "Customer", dueDate: details.dueDate,
-    status: cart.status === "CANCELLED" ? "cancelled" : cart.status === "COMPLETED" ? "completed" : details.releaseAuthorized ? "release_authorized" : paid >= cents(cart.grandTotal) ? "paid_ready" : "active",
+    status: cart.status === "EXPIRED" ? "expired" : cart.status === "CANCELLED" ? "cancelled" : cart.status === "COMPLETED" ? "completed" : details.releaseAuthorized ? "release_authorized" : paid >= cents(cart.grandTotal) ? "paid_ready" : "active",
     total: Number(cart.grandTotal), paid: paid / 100, remaining: Math.max(0, cents(cart.grandTotal) - paid) / 100,
     currency: cart.currency, note: details.note, cancellationReason: details.cancellationReason,
-    paymentsToSettle: cart.status === "CANCELLED" ? paid / 100 : 0,
+    paymentsToSettle: ["CANCELLED", "EXPIRED"].includes(cart.status) ? paid / 100 : 0,
     payments: cart.payments.filter((p: any) => record(p.metadata).layaway === true).map((p: any) => ({id: p.id, amount: Number(p.amount), method: p.method, reference: p.externalReference, createdAt: p.createdAt})),
     lines: cart.lines.map((line: any) => ({name: line.name, serial: line.serial}))};
 };
@@ -32,7 +32,7 @@ const summary = (cart: any) => {
 layawaysRouter.get("/", async (req, res, next) => {
   try {
     const session = sessionOf(req);
-    const carts = await prisma.cart.findMany({where: {tenantId: session.tenantId, storeId: session.storeId, fulfilment: {path: ["layaway", "dueDate"], not: Prisma.DbNull}}, include, orderBy: {updatedAt: "desc"}, take: 200});
+    const carts = await prisma.cart.findMany({where: {tenantId: session.tenantId, storeId: session.storeId, fulfilment: {path: ["layaway", "dueDate"], not: Prisma.DbNull}}, include, orderBy: {updatedAt: "desc"}, take: req.query.limit === "all" ? undefined : 200});
     res.json({success: true, data: carts.map(summary)});
   } catch (error) { next(error); }
 });
