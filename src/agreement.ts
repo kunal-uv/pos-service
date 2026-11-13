@@ -9,9 +9,25 @@ export interface AgreementLineSource {
 	rentalTenure: number | null;
 	unitPrice: unknown;
 	depositAmount: unknown;
+	/** The machine chosen for the line, and the dates it is rented for. */
+	serial?: string | null;
+	rentalStart?: Date | string | null;
+	rentalEnd?: Date | string | null;
 }
 
-/** The lines the platform renders an agreement from. */
+const isoOrUndefined = (value: Date | string | null | undefined): string | undefined => {
+	if (!value) return undefined;
+	const date = new Date(value);
+	return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+};
+
+/**
+ * The lines the platform renders an agreement from.
+ *
+ * The serial number and rental dates ride along when the line has them, so the
+ * agreement the customer reads before signing shows the machine and the term
+ * rather than blanks. They are left out entirely when absent.
+ */
 export const agreementLines = (lines: AgreementLineSource[]) =>
 	lines.map((line) => ({
 		productId: line.externalProductId,
@@ -19,6 +35,9 @@ export const agreementLines = (lines: AgreementLineSource[]) =>
 		rentalTenure: line.rentalTenure ?? 1,
 		unitPrice: Number(line.unitPrice),
 		depositAmount: Number(line.depositAmount),
+		...(line.serial ? { serial: line.serial } : {}),
+		...(isoOrUndefined(line.rentalStart) ? { rentalStart: isoOrUndefined(line.rentalStart) } : {}),
+		...(isoOrUndefined(line.rentalEnd) ? { rentalEnd: isoOrUndefined(line.rentalEnd) } : {}),
 	}));
 
 /**
