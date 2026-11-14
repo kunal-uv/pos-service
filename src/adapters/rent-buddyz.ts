@@ -154,7 +154,7 @@ export class RentBuddyzAdapter implements PlatformAdapter {
 	): Promise<{ exempt: boolean; reason: string | null }> {
 		const data = await this.request<{ customer: Record<string, unknown> }>(
 			withQuery(`${this.baseUrl}/admin/pos/customers/${encodeURIComponent(customerId)}`, {
-				store_id: session.storeId,
+				store_id: session.storeId,sale_check:"true",
 			}),
 			session.token,
 		);

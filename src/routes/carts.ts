@@ -157,6 +157,7 @@ cartsRouter.patch("/:id/lines/:lineId", async (request, response, next) => {
   try {
     const body = z
       .object({
+        quantity:z.number().int().min(1).max(100).optional(),
         note: z.string().max(2000).nullable().optional(),
         // The warranty plan sold with this line; null takes it off.
         warrantyId: z.string().min(1).max(40).nullable().optional(),

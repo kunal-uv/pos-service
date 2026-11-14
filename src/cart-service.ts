@@ -717,11 +717,13 @@ export const addLine = async (
   // Rentals need one as much as sales do: both platforms key their checkout on
   // the unit, so accepting a line without one only defers the refusal to the
   // commit, where the cart has already been locked.
-  if (session.capabilities.serializedInventory && !resolved.unit) {
+  const counted = session.tenantId === "rent-buddyz" && resolved.product.metadata?.stockMode === "count";
+  if (session.capabilities.serializedInventory && !resolved.unit && !counted) {
     throw new ApiError("Choose a serialized unit", 422, "UNIT_REQUIRED");
   }
-  let rentalTenure = input.rentalTenure;
-  if (cart.kind === "RENTAL") {
+  let rentalTenure = counted ? undefined : input.rentalTenure;
+  if (session.capabilities.serializedInventory && !counted && (input.quantity ?? 1) !== 1) throw new ApiError("A serialized line has one unit",422,"INVALID_QUANTITY");
+  if (cart.kind === "RENTAL" && !counted) {
     if (!input.rentalStart || !input.rentalEnd) {
       throw new ApiError(
         "Rental dates are required",
@@ -831,12 +833,13 @@ export const addLine = async (
           // exactly what a line fee is. The recurring ones are already
           // inside `unitPrice`, so they bill again every period.
           feeAmount: oneOffAddOns,
-          rentalStart: input.rentalStart ? new Date(input.rentalStart) : null,
-          rentalEnd: input.rentalEnd ? new Date(input.rentalEnd) : null,
+          rentalStart: !counted && input.rentalStart ? new Date(input.rentalStart) : null,
+          rentalEnd: !counted && input.rentalEnd ? new Date(input.rentalEnd) : null,
           rentalTenure,
           metadata: json({
             product: productMetadata,
             unit: resolved.unit?.metadata ?? null,
+            ...(counted?{lineFulfilment:"pickup"}:{}),
           }),
         },
       });
@@ -907,6 +910,7 @@ export const updateLine = async (
   cartId: string,
   lineId: string,
   input: {
+    quantity?: number;
     note?: string | null;
     warrantyId?: string | null;
     warrantyPrice?: number;
@@ -920,6 +924,13 @@ export const updateLine = async (
     const line = await tx.cartLine.findFirst({ where: { id: lineId, cartId } });
     if (!line) throw new ApiError("Cart line not found", 404, "LINE_NOT_FOUND");
 
+    if(input.quantity !== undefined){
+      if(session.tenantId!=="rent-buddyz" || !line.externalProductId.startsWith("counted:"))throw new ApiError("Only counted items have editable quantities",422,"INVALID_QUANTITY");
+      await tx.cartLine.update({where:{id:line.id},data:{quantity:input.quantity}});
+      await reprice(tx,cartId);await clearAgreementAcceptance(tx,cartId);
+      await tx.auditEvent.create({data:{tenantId:session.tenantId,storeId:session.storeId,userId:session.userId,entityType:"cart",entityId:cartId,
+        action:"line.quantity_changed",correlationId,before:json({lineId,quantity:line.quantity}),after:json({lineId,quantity:input.quantity})}});
+    }
     const metadata = fulfilmentRecord(line.metadata);
     const next: Record<string, unknown> = { ...metadata };
     const warrantyChanged = input.warrantyId !== undefined;

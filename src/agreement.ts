@@ -13,7 +13,7 @@ export interface AgreementLineSource {
 
 /** The lines the platform renders an agreement from. */
 export const agreementLines = (lines: AgreementLineSource[]) =>
-	lines.map((line) => ({
+	lines.filter(line=>!line.externalProductId.startsWith("counted:")).map((line) => ({
 		productId: line.externalProductId,
 		quantity: line.quantity,
 		rentalTenure: line.rentalTenure ?? 1,
