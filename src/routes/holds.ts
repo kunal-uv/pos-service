@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { sessionOf } from "../auth.js";
-import { listUnitHolds, releaseCartHolds } from "../cart-service.js";
+import { listUnitHolds, openHoldInTill, releaseCartHolds } from "../cart-service.js";
 
 /**
  * Units POS carts are holding, for the platform admin's Reserve & Hold page.
@@ -26,6 +26,18 @@ holdsRouter.post("/:cartId/release", async (request, response, next) => {
     response.json({
       success: true,
       data: await releaseCartHolds(sessionOf(request), request.params.cartId, reason, request.correlationId),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Puts a held cart on the caller's till (AO's "Open in POS"). */
+holdsRouter.post("/:cartId/open", async (request, response, next) => {
+  try {
+    response.json({
+      success: true,
+      data: await openHoldInTill(sessionOf(request), request.params.cartId, request.correlationId),
     });
   } catch (error) {
     next(error);

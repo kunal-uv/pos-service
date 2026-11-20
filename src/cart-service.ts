@@ -331,6 +331,11 @@ export const listUnitHolds = async (session: StaffSession) => {
       ? null
       : new Date(cart.updatedAt.getTime() + (kind === "OPEN_CART" ? CART_TTL_MS : PARKED_TTL_MS));
     const customer = (cart.customerSnapshot ?? {}) as { name?: string };
+    // A layaway never lapses by itself, but it has the due date it was written with.
+    const dueDate = layaway ? fulfilmentRecord(layaway).dueDate : null;
+    const dueAt = typeof dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dueDate)
+      ? new Date(`${dueDate}T23:59:59.999Z`)
+      : null;
     return {
       lineId: line.id,
       unitId: line.externalUnitId,
@@ -348,6 +353,7 @@ export const listUnitHolds = async (session: StaffSession) => {
       heldSince: line.createdAt,
       lastActivity: cart.updatedAt,
       releasesAt,
+      dueAt,
       paid,
       currency: cart.currency,
       cartTotal: number(cart.grandTotal),
@@ -412,6 +418,72 @@ export const releaseCartHolds = async (
       },
     });
     return { released: held.length };
+  });
+};
+
+/**
+ * Puts a held cart (an open cart on another till, a parked sale or a layaway) on this
+ * salesperson's till, as AO's "Open in POS" does: the cart becomes theirs and the till
+ * picks it up as its open cart. Refused when it would lose work or money:
+ * the salesperson's own cart already has items, a layaway still has a balance (it is
+ * settled from Layaways), or someone else's cart has a payment taken.
+ */
+export const openHoldInTill = async (session: StaffSession, cartId: string, correlationId: string) => {
+  if (!session.permissions.includes("pos:create")) {
+    throw new ApiError("Permission denied: pos.create required", 403, "FORBIDDEN");
+  }
+  return prisma.$transaction(async (tx) => {
+    const cart = await tx.cart.findFirst({
+      where: { id: cartId, tenantId: session.tenantId, storeId: session.storeId },
+      include: { payments: { where: { status: "CAPTURED" } } },
+    });
+    if (!cart) throw new ApiError("That POS cart was not found", 404, "CART_NOT_FOUND");
+    if (cart.status !== "OPEN" && cart.status !== "HELD") {
+      throw new ApiError("That cart no longer holds any units", 409, "NOT_HOLDING");
+    }
+    const own = cart.status === "OPEN" && cart.userId === session.userId;
+    if (own) return { cartId: cart.id, kind: cart.kind, taken: false };
+
+    const layaway = fulfilmentRecord(cart.fulfilment).layaway;
+    if (layaway) {
+      const paid = cart.payments.reduce((sum, p) => sum + Math.round(number(p.amount) * 100), 0);
+      const release = fulfilmentRecord(layaway).releaseAuthorized;
+      if (paid < Math.round(number(cart.grandTotal) * 100) && !release) {
+        throw new ApiError("This layaway still has a balance. Take the payment from Layaways first.", 409, "BALANCE_DUE");
+      }
+    } else if (cart.payments.length) {
+      throw new ApiError("This cart has a payment taken. Open it at the till that holds it.", 409, "HAS_PAYMENTS");
+    }
+
+    const mine = await tx.cart.findFirst({
+      where: {
+        tenantId: session.tenantId, storeId: session.storeId, userId: session.userId,
+        kind: cart.kind, status: "OPEN", id: { not: cart.id },
+      },
+      include: { lines: { select: { id: true } } },
+    });
+    if (mine?.lines.length) {
+      throw new ApiError("Your own till already has items in it. Park or finish that cart first.", 409, "OWN_CART_BUSY");
+    }
+    if (mine) {
+      await tx.cart.update({ where: { id: mine.id }, data: { status: "EXPIRED", version: { increment: 1 } } });
+    }
+    const changed = await tx.cart.updateMany({
+      where: { id: cart.id, version: cart.version, status: cart.status },
+      data: { status: "OPEN", userId: session.userId, heldName: null, version: { increment: 1 } },
+    });
+    if (changed.count !== 1) {
+      throw new ApiError("That cart changed while you were looking at it; refresh and try again", 409, "CART_VERSION_CONFLICT");
+    }
+    await tx.auditEvent.create({
+      data: {
+        tenantId: session.tenantId, storeId: session.storeId, userId: session.userId,
+        entityType: "cart", entityId: cart.id, action: "holds.opened_in_till", correlationId,
+        before: json({ status: cart.status, ownerUserId: cart.userId, heldName: cart.heldName }),
+        after: json({ ownerUserId: session.userId }),
+      },
+    });
+    return { cartId: cart.id, kind: cart.kind, taken: true };
   });
 };
 
